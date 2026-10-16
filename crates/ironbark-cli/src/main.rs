@@ -138,7 +138,7 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Pack { model, out, two_bit } => {
-            let p = ironbark_mlx::pack(&model, &out, !two_bit)?;
+            let p = ironbark_engine::pack(&model, &out, !two_bit)?;
             println!(
                 "packed {} experts x {:.2} MB (stride {} B) -> {}",
                 p.records,
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
             experts,
         } => maple::run(&model, &experts.into_experts(), &prompt, n_gen, top),
         Cmd::Verify { dir } => {
-            let r = ironbark_mlx::manifest::verify(&dir, 8)?;
+            let r = ironbark_engine::manifest::verify(&dir, 8)?;
             for p in &r.problems {
                 println!("BAD  {p}");
             }

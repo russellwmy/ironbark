@@ -18,8 +18,8 @@ path = "src/main.rs"
 [dependencies]
 ironbark-experts.workspace = true
 ironbark-fetch.workspace = true
+ironbark-engine.workspace = true
 ironbark-mlx.workspace = true
-mlx-rs.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokenizers.workspace = true

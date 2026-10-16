@@ -56,7 +56,7 @@ Toolchain upgrades are their own commit: bump `rust-toolchain.toml`, `rust-versi
 use std::sync::Arc;            // 1. std / core / alloc
 
 use anyhow::Result;            // 2. external crates
-use mlx_rs::Array;
+use ironbark_mlx::Array;
 
 use ironbark_experts::{ExpertRef, Store};   // 3. workspace crates
 
@@ -90,8 +90,9 @@ Local exceptions:
 - Use `#[expect(clippy::lint_name, reason = "...")]`, not `#[allow]`. `expect` fails when the lint no longer fires, so stale exceptions get removed.
 - Put the exception on the smallest item possible. Crate level only for these, always with a `reason`:
   - `ironbark-cli`: `#![expect(clippy::print_stdout, clippy::print_stderr)]`, printing is its job.
-  - `ironbark-mlx`: `#![allow(clippy::cast_possible_wrap)]`, MLX shapes and indices are `i32`.
+  - `ironbark-engine`: `#![allow(clippy::cast_possible_wrap)]`, MLX shapes and indices are `i32`.
   - Integration tests: `#![allow(...)]` for `unwrap` and `expect`.
+- The `ironbark-mlx*` crates (from mlx-rs, [DR-0002](docs/decisions/0002-own-mlx-bindings.md)) do not opt into the workspace lints and stay on edition 2021; they must pass default rustc and clippy lints. New code there follows this guide.
 
 ## 4. Naming
 
@@ -110,10 +111,10 @@ Local exceptions:
 ## 5. Crates and modules
 
 ```
- ironbark-cli ─────────────────────▶ ironbark-mlx ──▶ ironbark-experts
- ironbark-ffi ──▶ ironbark (lib) ──▶ ironbark-mlx
+ ironbark-cli ─────────────────────▶ ironbark-engine ──▶ ironbark-experts
+ ironbark-ffi ──▶ ironbark (lib) ──▶ ironbark-engine
       │               └────────────────────────────▶ ironbark-experts
-      ├────────────────────────────▶ ironbark-mlx
+      ├────────────────────────────▶ ironbark-engine
       └─────────▶ ironbark-fetch ──▶ ironbark-experts
 ```
 
@@ -127,10 +128,10 @@ Local exceptions:
 
 | Where | Use | Why |
 |---|---|---|
-| Library crates | `thiserror` enum (`ironbark_experts::Error`, `ironbark_mlx::Error`) | Callers can match on the cause |
+| Library crates | `thiserror` enum (`ironbark_experts::Error`, `ironbark_engine::Error`) | Callers can match on the cause |
 | `ironbark-cli` | `anyhow::Result` with `.context(...)` | Only needs a readable message |
 
-- Each library crate has its own `Error`, except `ironbark-fetch` (reuses `ironbark_experts::Error`) and `ironbark-ffi` (messages as `String` for C). Wrap a lower crate's error with `#[from]` (e.g. `ironbark_mlx::Error::Store`).
+- Each library crate has its own `Error`, except `ironbark-fetch` (reuses `ironbark_experts::Error`) and `ironbark-ffi` (messages as `String` for C). Wrap a lower crate's error with `#[from]` (e.g. `ironbark_engine::Error::Store`).
 - Every error names its file: use the helpers `Error::io(path)`, `Error::json(path)`, `Error::format(path, what)` in `ironbark-experts`, or the crate's own `io` helper.
 - Error messages are lowercase with no trailing period: `"read experts.json"`.
 - Add context where the error is raised (file path, layer, expert id), not where it is printed.

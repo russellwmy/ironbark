@@ -5,14 +5,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use mlx_rs::Array;
-use mlx_rs::ops::indexing::argmax_axis;
+use ironbark_mlx::Array;
+use ironbark_mlx::ops::indexing::argmax_axis;
 
+use ironbark_engine::Model;
+use ironbark_engine::bench::{ExpertStats, reset_stats};
+use ironbark_engine::device::{Hardware, footprint};
+use ironbark_engine::plan::{self, Plan};
 use ironbark_fetch::{FileFetch, Sparse};
-use ironbark_mlx::Model;
-use ironbark_mlx::bench::{ExpertStats, reset_stats};
-use ironbark_mlx::device::{Hardware, footprint};
-use ironbark_mlx::plan::{self, Plan};
 
 /// Where experts live: resident, or streamed from a packed dir with a per-layer cache.
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ fn load_fetching(dir: &Path, ex: &Experts) -> Result<(Model, Option<Fetching>)> 
                 p.slots,
                 p.peak as f64 / 1e9
             );
-            mlx_rs::memory::set_cache_limit(p.buffer_cache as usize)?;
+            ironbark_mlx::memory::set_cache_limit(p.buffer_cache as usize)?;
             match &ex.fetch {
                 Some(r) => {
                     let opened = Instant::now();
@@ -144,7 +144,7 @@ fn next(logits: &Array) -> Result<u32> {
 
 /// The `n` largest logits of `[1, 1, vocab]` as (token, logit).
 fn top_n(logits: &Array, n: usize) -> Result<Vec<(u32, f32)>> {
-    let l = logits.as_dtype(mlx_rs::Dtype::Float32)?;
+    let l = logits.as_dtype(ironbark_mlx::Dtype::Float32)?;
     let v: Vec<f32> = l.as_slice::<f32>().to_vec();
     let mut idx: Vec<usize> = (0..v.len()).collect();
     idx.sort_by(|a, b| v[*b].total_cmp(&v[*a]));
@@ -175,12 +175,12 @@ pub(crate) fn run(dir: &Path, ex: &Experts, prompt: &str, n_gen: usize, top: usi
     // while the GPU runs step t+1.
     reset_stats(&mut m);
     let t = Instant::now();
-    let mut y = argmax_axis(&logits, -1, None)?.reshape(&[1])?.as_dtype(mlx_rs::Dtype::Uint32)?;
-    mlx_rs::transforms::async_eval([&y])?;
+    let mut y = argmax_axis(&logits, -1, None)?.reshape(&[1])?.as_dtype(ironbark_mlx::Dtype::Uint32)?;
+    ironbark_mlx::transforms::async_eval([&y])?;
     for _ in out.len()..n_gen {
         let nl = m.step_lazy(&y)?;
-        let ny = argmax_axis(&nl, -1, None)?.reshape(&[1])?.as_dtype(mlx_rs::Dtype::Uint32)?;
-        mlx_rs::transforms::async_eval([&ny])?;
+        let ny = argmax_axis(&nl, -1, None)?.reshape(&[1])?.as_dtype(ironbark_mlx::Dtype::Uint32)?;
+        ironbark_mlx::transforms::async_eval([&ny])?;
         out.push(y.item_exact::<u32>());
         y = ny;
     }
@@ -200,8 +200,8 @@ pub(crate) fn run(dir: &Path, ex: &Experts, prompt: &str, n_gen: usize, top: usi
     }
     println!(
         "MLX memory: active {:.2} GB, peak {:.2} GB",
-        mlx_rs::memory::active_memory()? as f64 / 1e9,
-        mlx_rs::memory::peak_memory()? as f64 / 1e9
+        ironbark_mlx::memory::active_memory()? as f64 / 1e9,
+        ironbark_mlx::memory::peak_memory()? as f64 / 1e9
     );
     if let Some(f) = footprint() {
         println!("footprint: {:.2} GB, peak {:.2} GB", f.now as f64 / 1e9, f.peak as f64 / 1e9);
@@ -227,7 +227,7 @@ pub(crate) fn ppl(dir: &Path, ex: &Experts, text: &Path, n: usize, batch: bool) 
     anyhow::ensure!(ids.len() > n, "text has only {} tokens", ids.len());
     if batch {
         // One batched forward over the first n - 1 tokens; logits of every position.
-        let logits = m.prefill(&ids[..n - 1], true)?.as_dtype(mlx_rs::Dtype::Float32)?;
+        let logits = m.prefill(&ids[..n - 1], true)?.as_dtype(ironbark_mlx::Dtype::Float32)?;
         let vocab = m.cfg.vocab;
         let all = logits.as_slice::<f32>();
         let (mut total, mut count) = (0f64, 0usize);
@@ -246,7 +246,7 @@ pub(crate) fn ppl(dir: &Path, ex: &Experts, text: &Path, n: usize, batch: bool) 
         }
         let l = m.step(ids[t])?;
         if t >= n / 2 {
-            let v = l.as_dtype(mlx_rs::Dtype::Float32)?;
+            let v = l.as_dtype(ironbark_mlx::Dtype::Float32)?;
             total += nll(v.as_slice::<f32>(), ids[t + 1]);
             count += 1;
         }

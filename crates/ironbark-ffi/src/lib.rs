@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ironbark::{Chunks, ExpertStats, Hardware, Options, Records};
+use ironbark_engine::bench;
 use ironbark_fetch::{Fetch, Sparse};
-use ironbark_mlx::bench;
 use serde_json::{Value, json};
 
 pub mod tool_check;
@@ -134,11 +134,11 @@ fn probe(dir: Option<&Path>) -> Result<Value> {
 
 /// MLX's GPU memory, the process footprint (what iOS limits), and on iOS the app limit.
 fn memory() -> Value {
-    let fp = ironbark_mlx::device::footprint();
+    let fp = ironbark_engine::device::footprint();
     json!({
-        "mlx_active": mlx_rs::memory::active_memory().ok(),
-        "mlx_peak": mlx_rs::memory::peak_memory().ok(),
-        "mlx_cache": mlx_rs::memory::cache_memory().ok(),
+        "mlx_active": ironbark_mlx::memory::active_memory().ok(),
+        "mlx_peak": ironbark_mlx::memory::peak_memory().ok(),
+        "mlx_cache": ironbark_mlx::memory::cache_memory().ok(),
         "footprint": fp.map(|f| f.now),
         "footprint_peak": fp.map(|f| f.peak),
         "app_limit": Hardware::detect().app_limit,
@@ -519,7 +519,7 @@ pub unsafe extern "C" fn ironbark_probe(dir: *const c_char) -> *mut c_char {
     report(|| probe(dir.transpose()?.map(PathBuf::from).as_deref()))
 }
 
-/// GPU time of each part of a decode step (see `ironbark_mlx::profile`). Returns JSON.
+/// GPU time of each part of a decode step (see `ironbark_engine::profile`). Returns JSON.
 ///
 /// # Safety
 ///
@@ -807,7 +807,7 @@ mod tests {
         let bin: Vec<u8> = (0..3 * CHUNK).map(|i| (i * 7) as u8).collect();
         std::fs::write(server.join("embed.bin"), &bin).unwrap();
         let hashes: Vec<String> =
-            bin.chunks(CHUNK).map(|d| format!("\"{:016x}\"", ironbark_mlx::manifest::hash(d))).collect();
+            bin.chunks(CHUNK).map(|d| format!("\"{:016x}\"", ironbark_engine::manifest::hash(d))).collect();
         let manifest = format!(
             r#"{{"version": 1, "files": {{"embed.bin": {{"bytes": {}, "record_bytes": {CHUNK}, "stride": {CHUNK}, "records": [{}]}}}}}}"#,
             bin.len(),

@@ -43,13 +43,14 @@ Maple has 24 layers with 256 experts each, and each token uses 8 of them per lay
 ironbark/
 ├── crates/
 │   ├── ironbark/           library: Session, chat, tools
-│   ├── ironbark-mlx/       model, Metal kernels, prefill, plan, pack
+│   ├── ironbark-engine/    model, Metal kernels, prefill, plan, pack
 │   ├── ironbark-experts/   expert store: slab, loaders, LRU, pinning
 │   ├── ironbark-fetch/     fills experts.bin / embed.bin from a remote copy
 │   ├── ironbark-ffi/       C API (include/ironbark.h)
-│   └── ironbark-cli/       `ironbark` binary: pack, verify, gen, ppl, profile
+│   ├── ironbark-cli/       `ironbark` binary: pack, verify, gen, ppl, profile
+│   ├── ironbark-mlx/       safe Rust API over MLX
+│   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                    IronbarkBench app (SwiftUI, xcodegen)
-├── vendor/mlx-sys/         mlx-sys 0.6 patched for iOS (IRONBARK.md)
 └── docs/decisions/         decision records
 ```
 
@@ -57,21 +58,23 @@ ironbark/
 
 ```
  ironbark-cli ─────────────────────┐
- ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-mlx ──▶ mlx-rs (MLX 0.32, Metal)
-    ├──────────────────────────────┘      └──▶ ironbark-experts
+ ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-engine ──▶ ironbark-mlx (MLX 0.32, Metal)
+    ├──────────────────────────────┘         └──▶ ironbark-experts
     └──▶ ironbark-fetch ──▶ ironbark-experts (Records trait, layout, hash only)
 ```
 
 | Crate | Owns | Key types |
 |---|---|---|
 | `ironbark` | The public API: open sized to the device, chat turns, tool calls | `Session`, `Options`, `Reply`, `Message`, `parse` |
-| `ironbark-mlx` | Everything on the GPU and the file formats | `Model`, `Plan`, `Config`, `pack`, `KvSnapshot` |
+| `ironbark-engine` | Everything on the GPU and the file formats | `Model`, `Plan`, `Config`, `pack`, `KvSnapshot` |
 | `ironbark-experts` | Expert memory and loading, no GPU code | `Store`, `Slab`, `Layout`, `Records` |
 | `ironbark-fetch` | A sparse `experts.bin` that fills from a server | `Sparse`, `Fetch` |
 | `ironbark-ffi` | C functions returning JSON, for Swift | `ironbark_open`, `ironbark_send`, … |
 | `ironbark-cli` | Developer tools | `ironbark pack / verify / gen / ppl / profile` |
+| `ironbark-mlx` | Safe Rust API over MLX for inference | `Array`, `ops`, `transforms`, `fast` |
+| `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS | bindgen output |
 
-`ironbark-experts` knows nothing about MLX: it hands out pinned slots of a byte slab. `ironbark-mlx` wraps that slab as one MLX array, so kernels read the slots in place.
+`ironbark-experts` knows nothing about MLX: it hands out pinned slots of a byte slab. `ironbark-engine` wraps that slab as one MLX array, so kernels read the slots in place.
 
 ## Model on disk
 
@@ -115,7 +118,7 @@ Session::open(dir, Options)
   └─ Tokenizer
 ```
 
-The plan (`ironbark-mlx/src/plan.rs`):
+The plan (`ironbark-engine/src/plan.rs`):
 
 ```
 budget = min(RAM · 3/8, app limit / 2)
@@ -304,9 +307,9 @@ See [STYLE.md](STYLE.md) for the full style and lint rules.
 | To understand | Read |
 |---|---|
 | The public API | `crates/ironbark/src/lib.rs` (`Session`) |
-| One decode step | `crates/ironbark-mlx/src/model.rs` (`step_lazy`) |
-| The kernels | `crates/ironbark-mlx/src/row.rs`, `fused.rs` |
+| One decode step | `crates/ironbark-engine/src/model.rs` (`step_lazy`) |
+| The kernels | `crates/ironbark-engine/src/row.rs`, `fused.rs` |
 | Expert caching | `crates/ironbark-experts/src/store.rs` |
-| Memory sizing | `crates/ironbark-mlx/src/plan.rs` |
-| The file format | `crates/ironbark-mlx/src/pack.rs`, `crates/ironbark-experts/src/layout.rs` |
+| Memory sizing | `crates/ironbark-engine/src/plan.rs` |
+| The file format | `crates/ironbark-engine/src/pack.rs`, `crates/ironbark-experts/src/layout.rs` |
 | Chat and tools | `crates/ironbark/src/tools.rs`, `ios/IronbarkBench/App.swift` |

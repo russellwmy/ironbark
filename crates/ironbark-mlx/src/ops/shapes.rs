@@ -1,0 +1,1507 @@
+use smallvec::SmallVec;
+
+use crate::{
+    Array, Axes, Stream,
+    constants::DEFAULT_STACK_VEC_LEN,
+    error::Result,
+    utils::{IntoOption, VectorArray, guard::Guarded},
+};
+
+static EMPTY_AXES_DUMMY: [i32; 1] = [0];
+
+/// Options controlling contiguous layout materialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ContiguousOptions {
+    /// Permit MLX to retain a column-major layout when it is already suitable.
+    pub allow_col_major: bool,
+}
+
+impl Array {
+    /// Return an array that is row-major contiguous after evaluation.
+    ///
+    /// MLX may share the input buffer when it is already suitable.
+    pub fn contiguous(&self) -> Result<Array> {
+        self.contiguous_with_options(ContiguousOptions::default())
+    }
+
+    /// Materialize a contiguous array according to `options`.
+    ///
+    /// Allowing column-major layout does not force it and does not guarantee that the result can
+    /// be borrowed with [`Array::try_as_slice`].
+    pub fn contiguous_with_options(&self, options: ContiguousOptions) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        Array::try_from_op(|res| unsafe {
+            ironbark_mlx_sys::mlx_contiguous(res, self.as_ptr(), options.allow_col_major, stream.as_ref().as_ptr())
+        })
+    }
+
+    /// Reverse elements along selected axes.
+    ///
+    /// `Axes::All` reverses every axis, while an explicitly empty axis list is an identity.
+    ///
+    /// ```rust
+    /// use ironbark_mlx::{array, Axes};
+    ///
+    /// let output = array!([[1, 2], [3, 4]]).flip(Axes::Axis(-1)).unwrap();
+    /// assert_eq!(output.shape(), &[2, 2]);
+    /// ```
+    pub fn flip(&self, axes: Axes) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        match axes {
+            Axes::All => Array::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::mlx_flip(res, self.as_ptr(), stream.as_ref().as_ptr())
+            }),
+            Axes::Axis(axis) => Array::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::mlx_flip_axis(res, self.as_ptr(), axis, stream.as_ref().as_ptr())
+            }),
+            Axes::Axes(axes) => {
+                let axes_ptr = if axes.is_empty() {
+                    EMPTY_AXES_DUMMY.as_ptr()
+                } else {
+                    axes.as_ptr()
+                };
+                Array::try_from_op(|res| unsafe {
+                    ironbark_mlx_sys::mlx_flip_axes(res, self.as_ptr(), axes_ptr, axes.len(), stream.as_ref().as_ptr())
+                })
+            }
+        }
+    }
+
+    /// Split an array along `axis` and squeeze that axis from every output.
+    ///
+    /// A zero-length selected axis returns an empty vector.
+    ///
+    /// ```rust
+    /// use ironbark_mlx::array;
+    ///
+    /// let parts = array!([[1, 2], [3, 4]]).unstack(0).unwrap();
+    /// assert_eq!(parts.len(), 2);
+    /// assert_eq!(parts[0].shape(), &[2]);
+    /// ```
+    pub fn unstack(&self, axis: i32) -> Result<Vec<Array>> {
+        let stream = Stream::thread_local_or_default();
+        Vec::<Array>::try_from_op(|res| unsafe {
+            if axis == 0 {
+                ironbark_mlx_sys::mlx_unstack(res, self.as_ptr(), stream.as_ref().as_ptr())
+            } else {
+                ironbark_mlx_sys::mlx_unstack_axis(res, self.as_ptr(), axis, stream.as_ref().as_ptr())
+            }
+        })
+    }
+
+    /// See [`expand_dims()`].
+    pub fn expand_dims(&self, axis: i32) -> Result<Array> {
+        expand_dims(self, axis)
+    }
+
+    /// Compatibility shim for [`expand_dims`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `expand_dims`")]
+    pub fn expand_dims_device(&self, axis: i32, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.expand_dims(axis))
+    }
+
+    /// See [`expand_dims_axes()`].
+    pub fn expand_dims_axes(&self, axes: &[i32]) -> Result<Array> {
+        expand_dims_axes(self, axes)
+    }
+
+    /// Compatibility shim for [`expand_dims_axes`].
+    #[deprecated(
+        since = "0.26.0",
+        note = "use `with_stream` or `with_device` around `expand_dims_axes`"
+    )]
+    pub fn expand_dims_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.expand_dims_axes(axes))
+    }
+
+    /// See [`flatten`].
+    pub fn flatten(&self, start_axis: impl Into<Option<i32>>, end_axis: impl Into<Option<i32>>) -> Result<Array> {
+        flatten(self, start_axis, end_axis)
+    }
+
+    /// Compatibility shim for [`flatten`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `flatten`")]
+    pub fn flatten_device(
+        &self,
+        start_axis: impl Into<Option<i32>>,
+        end_axis: impl Into<Option<i32>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.flatten(start_axis, end_axis))
+    }
+
+    /// See [`reshape`].
+    pub fn reshape(&self, shape: &[i32]) -> Result<Array> {
+        reshape(self, shape)
+    }
+
+    /// Compatibility shim for [`reshape`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `reshape`")]
+    pub fn reshape_device(&self, shape: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.reshape(shape))
+    }
+
+    /// See [`squeeze_axes()`].
+    pub fn squeeze_axes(&self, axes: &[i32]) -> Result<Array> {
+        squeeze_axes(self, axes)
+    }
+
+    /// Compatibility shim for [`squeeze_axes`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `squeeze_axes`")]
+    pub fn squeeze_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.squeeze_axes(axes))
+    }
+
+    /// See [`squeeze()`].
+    pub fn squeeze(&self) -> Result<Array> {
+        squeeze(self)
+    }
+
+    /// Compatibility shim for [`squeeze`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `squeeze`")]
+    pub fn squeeze_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.squeeze())
+    }
+
+    /// See [`as_strided`]
+    pub fn as_strided<'a>(
+        &'a self,
+        shape: impl IntoOption<&'a [i32]>,
+        strides: impl IntoOption<&'a [i64]>,
+        offset: impl Into<Option<usize>>,
+    ) -> Result<Array> {
+        as_strided(self, shape, strides, offset)
+    }
+
+    /// Compatibility shim for [`as_strided`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `as_strided`")]
+    pub fn as_strided_device<'a>(
+        &'a self,
+        shape: impl IntoOption<&'a [i32]>,
+        strides: impl IntoOption<&'a [i64]>,
+        offset: impl Into<Option<usize>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.as_strided(shape, strides, offset))
+    }
+
+    /// See [`at_least_1d`]
+    pub fn at_least_1d(&self) -> Result<Array> {
+        at_least_1d(self)
+    }
+
+    /// Compatibility shim for [`at_least_1d`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_1d`")]
+    pub fn at_least_1d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.at_least_1d())
+    }
+
+    /// See [`at_least_2d`]
+    pub fn at_least_2d(&self) -> Result<Array> {
+        at_least_2d(self)
+    }
+
+    /// Compatibility shim for [`at_least_2d`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_2d`")]
+    pub fn at_least_2d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.at_least_2d())
+    }
+
+    /// See [`at_least_3d`]
+    pub fn at_least_3d(&self) -> Result<Array> {
+        at_least_3d(self)
+    }
+
+    /// Compatibility shim for [`at_least_3d`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_3d`")]
+    pub fn at_least_3d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.at_least_3d())
+    }
+
+    /// See [`move_axis`]
+    pub fn move_axis(&self, src: i32, dst: i32) -> Result<Array> {
+        move_axis(self, src, dst)
+    }
+
+    /// Compatibility shim for [`move_axis`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `move_axis`")]
+    pub fn move_axis_device(&self, src: i32, dst: i32, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.move_axis(src, dst))
+    }
+
+    /// See [`split_at_indices`].
+    pub fn split_at_indices(&self, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+        split_at_indices(self, indices, axis)
+    }
+
+    /// Compatibility alias for [`Array::split_at_indices`].
+    #[deprecated(since = "0.26.0", note = "renamed to `split_at_indices`")]
+    pub fn split_axis(&self, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+        self.split_at_indices(indices, axis)
+    }
+
+    /// Compatibility shim for [`split_axis`].
+    #[deprecated(
+        since = "0.26.0",
+        note = "use `with_stream` or `with_device` around `split_at_indices`"
+    )]
+    pub fn split_axis_device(
+        &self,
+        indices: &[i32],
+        axis: impl Into<Option<i32>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Vec<Array>> {
+        crate::with_stream(stream.as_ref(), || self.split_at_indices(indices, axis))
+    }
+
+    /// See [`split_equal`].
+    pub fn split_equal(&self, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+        split_equal(self, num_parts, axis)
+    }
+
+    /// Compatibility alias for [`Array::split_equal`].
+    #[deprecated(since = "0.26.0", note = "renamed to `split_equal`")]
+    pub fn split(&self, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+        self.split_equal(num_parts, axis)
+    }
+
+    /// Compatibility shim for [`split`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `split_equal`")]
+    pub fn split_device(
+        &self,
+        num_parts: i32,
+        axis: impl Into<Option<i32>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Vec<Array>> {
+        crate::with_stream(stream.as_ref(), || self.split_equal(num_parts, axis))
+    }
+
+    /// See [`swap_axes`]
+    pub fn swap_axes(&self, axis1: i32, axis2: i32) -> Result<Array> {
+        swap_axes(self, axis1, axis2)
+    }
+
+    /// Compatibility shim for [`swap_axes`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `swap_axes`")]
+    pub fn swap_axes_device(&self, axis1: i32, axis2: i32, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.swap_axes(axis1, axis2))
+    }
+
+    /// See [`transpose_axes`]
+    pub fn transpose_axes(&self, axes: &[i32]) -> Result<Array> {
+        transpose_axes(self, axes)
+    }
+
+    /// Compatibility shim for [`transpose_axes`].
+    #[deprecated(
+        since = "0.26.0",
+        note = "use `with_stream` or `with_device` around `transpose_axes`"
+    )]
+    pub fn transpose_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.transpose_axes(axes))
+    }
+
+    /// See [`transpose`]
+    pub fn transpose(&self) -> Result<Array> {
+        transpose(self)
+    }
+
+    /// Compatibility shim for [`transpose`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `transpose`")]
+    pub fn transpose_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.transpose())
+    }
+
+    /// [`transpose_axes`] and unwrap the result.
+    pub fn t(&self) -> Array {
+        self.transpose().unwrap()
+    }
+}
+fn resolve_strides(shape: &[i32], strides: Option<&[i64]>) -> SmallVec<[i64; DEFAULT_STACK_VEC_LEN]> {
+    match strides {
+        Some(strides) => SmallVec::from_slice(strides),
+        None => {
+            let result = shape
+                .iter()
+                .rev()
+                .scan(1, |acc, &dim| {
+                    let result = *acc;
+                    *acc *= dim as i64;
+                    Some(result)
+                })
+                .collect::<SmallVec<[i64; DEFAULT_STACK_VEC_LEN]>>();
+            result.into_iter().rev().collect()
+        }
+    }
+}
+
+/// Broadcast a vector of arrays against one another. Returns an error if the shapes are
+/// broadcastable.
+///
+/// # Params
+///
+/// - `arrays`: The arrays to broadcast.
+pub fn broadcast_arrays(arrays: &[impl AsRef<Array>]) -> Result<Vec<Array>> {
+    let stream = Stream::thread_local_or_default();
+    let c_vec = VectorArray::try_from_iter(arrays.iter())?;
+    Vec::<Array>::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_broadcast_arrays(res, c_vec.as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Create a view into the array with the given shape and strides.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_iter(0..10, &[10]);
+/// let y = as_strided(&x, &[3, 3], &[1, 1], 0);
+/// ```
+pub fn as_strided<'a>(
+    a: impl AsRef<Array>,
+    shape: impl IntoOption<&'a [i32]>,
+    strides: impl IntoOption<&'a [i64]>,
+    offset: impl Into<Option<usize>>,
+) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let a = a.as_ref();
+    let shape = shape.into_option().unwrap_or(a.shape());
+    let resolved_strides = resolve_strides(shape, strides.into_option());
+    let offset = offset.into().unwrap_or(0);
+
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_as_strided(
+            res,
+            a.as_ptr(),
+            shape.as_ptr(),
+            shape.len(),
+            resolved_strides.as_ptr(),
+            resolved_strides.len(),
+            offset,
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Broadcast an array to the given shape. Returns an error if the shapes are not broadcastable.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `shape`: The shape to broadcast to.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_f32(2.3);
+/// let result = broadcast_to(&x, &[1, 1]);
+/// ```
+pub fn broadcast_to(a: impl AsRef<Array>, shape: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_broadcast_to(
+            res,
+            a.as_ref().as_ptr(),
+            shape.as_ptr(),
+            shape.len(),
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Concatenate the arrays along the given axis. Returns an error if the shapes are invalid.
+///
+/// # Params
+///
+/// - `arrays`: The arrays to concatenate.
+/// - `axis`: The axis to concatenate along.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_iter(0..4, &[2, 2]);
+/// let y = Array::from_iter(4..8, &[2, 2]);
+/// let result = concatenate(&[x, y], 0);
+/// ```
+pub fn concatenate(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let c_arrays = VectorArray::try_from_iter(arrays.iter())?;
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_concatenate_axis(res, c_arrays.as_ptr(), axis, stream.as_ref().as_ptr())
+    })
+}
+
+/// Compatibility alias for [`concatenate`].
+#[deprecated(since = "0.26.0", note = "renamed to `concatenate`")]
+pub fn concatenate_axis(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    concatenate(arrays, axis)
+}
+
+/// Flatten the arrays and concatenate them. Use [`concatenate`] to concatenate along an axis.
+pub fn concatenate_flat(arrays: &[impl AsRef<Array>]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let c_arrays = VectorArray::try_from_iter(arrays.iter())?;
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_concatenate(res, c_arrays.as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Add a size one dimension at the given axis, returns an error if the axes are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `axes`: The index of the inserted dimensions.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::zeros::<i32>(&[2, 2]).unwrap();
+/// let result = expand_dims_axes(&x, &[0]);
+/// ```
+pub fn expand_dims_axes(a: impl AsRef<Array>, axes: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_expand_dims_axes(
+            res,
+            a.as_ref().as_ptr(),
+            axes.as_ptr(),
+            axes.len(),
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Similar to [`expand_dims_axes`], but only takes a single axis.
+pub fn expand_dims(a: impl AsRef<Array>, axis: i32) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_expand_dims(res, a.as_ref().as_ptr(), axis, stream.as_ref().as_ptr())
+    })
+}
+
+/// Flatten an array. Returns an error if the axes are invalid.
+///
+/// The axes flattened will be between `start_axis` and `end_axis`, inclusive. Negative axes are
+/// supported. After converting negative axis to positive, axes outside the valid range will be
+/// clamped to a valid value, `start_axis` to `0` and `end_axis` to `ndim - 1`.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `start_axis`: The first axis to flatten. Default is `0` if not provided.
+/// - `end_axis`: The last axis to flatten. Default is `-1` if not provided.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::zeros::<i32>(&[2, 2, 2]).unwrap();
+/// let y = flatten(&x, None, None);
+/// ```
+pub fn flatten(
+    a: impl AsRef<Array>,
+    start_axis: impl Into<Option<i32>>,
+    end_axis: impl Into<Option<i32>>,
+) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let start_axis = start_axis.into().unwrap_or(0);
+    let end_axis = end_axis.into().unwrap_or(-1);
+
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_flatten(res, a.as_ref().as_ptr(), start_axis, end_axis, stream.as_ref().as_ptr())
+    })
+}
+
+/// Unflatten an axis of an array to a shape.
+///
+/// # Params
+///
+/// - `a`: input array
+/// - `axis`: axis to unflatten
+/// - `shape`: shape to unflatten into
+pub fn unflatten(a: impl AsRef<Array>, axis: i32, shape: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_unflatten(
+            res,
+            a.as_ref().as_ptr(),
+            axis,
+            shape.as_ptr(),
+            shape.len(),
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Reshape an array while preserving the size. Returns an error if the new shape is invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `shape`: New shape.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::zeros::<i32>(&[2, 2]).unwrap();
+/// let result = reshape(&x, &[4]);
+/// ```
+pub fn reshape(a: impl AsRef<Array>, shape: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_reshape(res, a.as_ref().as_ptr(), shape.as_ptr(), shape.len(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Remove length one axes from an array. Returns an error if the axes are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `axes`: Axes to remove. If `None`, all length one axes will be removed.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::zeros::<i32>(&[1, 2, 1, 3]).unwrap();
+/// let result = squeeze(&x);
+/// ```
+pub fn squeeze_axes(a: impl AsRef<Array>, axes: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let a = a.as_ref();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_squeeze_axes(res, a.as_ptr(), axes.as_ptr(), axes.len(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Similar to [`squeeze_axes`], but removes all length one axes.
+pub fn squeeze(a: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let a = a.as_ref();
+    Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_squeeze(res, a.as_ptr(), stream.as_ref().as_ptr()) })
+}
+
+/// Convert array to have at least one dimension.
+///
+/// # Params
+///
+/// - `a`: The input array.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_int(1);
+/// let out = at_least_1d(&x);
+/// ```
+pub fn at_least_1d(a: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_atleast_1d(res, a.as_ref().as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Convert array to have at least two dimensions.
+///
+/// # Params
+///
+/// - `a`: The input array.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_int(1);
+/// let out = at_least_2d(&x);
+/// ```
+pub fn at_least_2d(a: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_atleast_2d(res, a.as_ref().as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Convert array to have at least three dimensions.
+///
+/// # Params
+///
+/// - `a`: The input array.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_int(1);
+/// let out = at_least_3d(&x);
+/// ```
+pub fn at_least_3d(a: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_atleast_3d(res, a.as_ref().as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Move an axis to a new position. Returns an error if the axes are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `src`: Specifies the source axis.
+/// - `dst`: Specifies the destination axis.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::zeros::<i32>(&[2, 3, 4]).unwrap();
+/// let result = move_axis(&a, 0, 2);
+/// ```
+pub fn move_axis(a: impl AsRef<Array>, src: i32, dst: i32) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_moveaxis(res, a.as_ref().as_ptr(), src, dst, stream.as_ref().as_ptr())
+    })
+}
+
+/// Split an array along a given axis. Returns an error if the indices are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `indices`: The indices to split at.
+/// - `axis`: The axis to split along. Default is `0` if not provided.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::from_iter(0..10, &[10]);
+/// let result = split_at_indices(&a, &[3, 7], 0);
+/// ```
+pub fn split_at_indices(a: impl AsRef<Array>, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+    let stream = Stream::thread_local_or_default();
+    let axis = axis.into().unwrap_or(0);
+    Vec::<Array>::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_split_sections(
+            res,
+            a.as_ref().as_ptr(),
+            indices.as_ptr(),
+            indices.len(),
+            axis,
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Compatibility alias for [`split_at_indices`].
+#[deprecated(since = "0.26.0", note = "renamed to `split_at_indices`")]
+pub fn split_sections(a: impl AsRef<Array>, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+    split_at_indices(a, indices, axis)
+}
+
+/// Split an array into equal parts along a given axis. Returns an error if the array cannot be
+/// split into equal parts.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `num_parts`: The number of parts to split into.
+/// - `axis`: The axis to split along. Default is `0` if not provided.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::from_iter(0..10, &[10]);
+/// let result = split_equal(&a, 2, 0);
+/// ```
+pub fn split_equal(a: impl AsRef<Array>, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+    let stream = Stream::thread_local_or_default();
+    let axis = axis.into().unwrap_or(0);
+    Vec::<Array>::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_split(res, a.as_ref().as_ptr(), num_parts, axis, stream.as_ref().as_ptr())
+    })
+}
+
+/// Compatibility alias for [`split_equal`].
+#[deprecated(since = "0.26.0", note = "renamed to `split_equal`")]
+pub fn split(a: impl AsRef<Array>, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
+    split_equal(a, num_parts, axis)
+}
+
+/// Number of padding values to add to the edges of each axis.
+#[derive(Debug)]
+pub enum PadWidth<'a> {
+    /// (before, after) values for all axes.
+    Same((i32, i32)),
+
+    /// List of (before, after) values for each axis.
+    Widths(&'a [(i32, i32)]),
+}
+
+impl From<i32> for PadWidth<'_> {
+    fn from(width: i32) -> Self {
+        PadWidth::Same((width, width))
+    }
+}
+
+impl From<(i32, i32)> for PadWidth<'_> {
+    fn from(width: (i32, i32)) -> Self {
+        PadWidth::Same(width)
+    }
+}
+
+impl<'a> From<&'a [(i32, i32)]> for PadWidth<'a> {
+    fn from(widths: &'a [(i32, i32)]) -> Self {
+        PadWidth::Widths(widths)
+    }
+}
+
+impl<'a, const N: usize> From<&'a [(i32, i32); N]> for PadWidth<'a> {
+    fn from(widths: &'a [(i32, i32); N]) -> Self {
+        PadWidth::Widths(widths)
+    }
+}
+
+impl PadWidth<'_> {
+    fn low_pads(&self, ndim: usize) -> SmallVec<[i32; DEFAULT_STACK_VEC_LEN]> {
+        match self {
+            PadWidth::Same((low, _high)) => (0..ndim).map(|_| *low).collect(),
+            PadWidth::Widths(widths) => widths.iter().map(|(low, _high)| *low).collect(),
+        }
+    }
+    fn high_pads(&self, ndim: usize) -> SmallVec<[i32; DEFAULT_STACK_VEC_LEN]> {
+        match self {
+            PadWidth::Same((_low, high)) => (0..ndim).map(|_| *high).collect(),
+            PadWidth::Widths(widths) => widths.iter().map(|(_low, high)| *high).collect(),
+        }
+    }
+}
+
+/// The padding mode.
+#[derive(Debug)]
+pub enum PadMode {
+    /// Pad with a constant value.
+    Constant,
+
+    /// Pad with the edge value.
+    Edge,
+}
+
+impl PadMode {
+    unsafe fn as_c_str(&self) -> *const i8 {
+        static CONSTANT: &[u8] = b"constant\0";
+        static EDGE: &[u8] = b"edge\0";
+
+        match self {
+            PadMode::Constant => CONSTANT.as_ptr() as *const _,
+            PadMode::Edge => EDGE.as_ptr() as *const _,
+        }
+    }
+}
+
+/// Pad an array with a constant value. Returns an error if the width is invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `width`: Number of padded values to add to the edges of each axis:`((before_1, after_1),
+///   (before_2, after_2), ..., (before_N, after_N))`. If a single pair of integers is passed then
+///   `(before_i, after_i)` are all the same. If a single integer or tuple with a single integer is
+///   passed then all axes are extended by the same number on each side.
+/// - `value`: The value to pad the array with. Default is `0` if not provided.
+/// - `mode`: The padding mode. Default is `PadMode::Constant` if not provided.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::from_iter(0..4, &[2, 2]);
+/// let result = pad(&a, 1, Array::from_int(0), None);
+/// ```
+pub fn pad<'a>(
+    a: impl AsRef<Array>,
+    width: impl Into<PadWidth<'a>>,
+    value: impl Into<Option<Array>>,
+    mode: impl Into<Option<PadMode>>,
+) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let a = a.as_ref();
+    let width = width.into();
+    let ndim = a.ndim();
+    let axes: SmallVec<[i32; DEFAULT_STACK_VEC_LEN]> = (0..ndim).map(|i| i as i32).collect();
+    let low_pads = width.low_pads(ndim);
+    let high_pads = width.high_pads(ndim);
+    let value = value.into().map(Ok).unwrap_or_else(|| Array::from_int(0).as_dtype(a.dtype()))?;
+    let mode = mode.into().unwrap_or(PadMode::Constant);
+
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_pad(
+            res,
+            a.as_ptr(),
+            axes.as_ptr(),
+            axes.len(),
+            low_pads.as_ptr(),
+            low_pads.len(),
+            high_pads.as_ptr(),
+            high_pads.len(),
+            value.as_ptr(),
+            mode.as_c_str(),
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Stacks the arrays along a new axis. Returns an error if the arguments are invalid.
+///
+/// # Params
+///
+/// - `arrays`: The input arrays.
+/// - `axis`: The axis in the result array along which the input arrays are stacked.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::from_iter(0..4, &[2, 2]);
+/// let b = Array::from_iter(4..8, &[2, 2]);
+/// let result = stack(&[&a, &b], 0);
+/// ```
+pub fn stack(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let c_vec = VectorArray::try_from_iter(arrays.iter())?;
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_stack_axis(res, c_vec.as_ptr(), axis, stream.as_ref().as_ptr())
+    })
+}
+
+/// Compatibility alias for [`stack`].
+#[deprecated(since = "0.26.0", note = "renamed to `stack`")]
+pub fn stack_axis(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
+    stack(arrays, axis)
+}
+
+/// Swap two axes of an array. Returns an error if the axes are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `axis1`: The first axis.
+/// - `axis2`: The second axis.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let a = Array::from_iter(0..6, &[2, 3]);
+/// let result = swap_axes(&a, 0, 1);
+/// ```
+pub fn swap_axes(a: impl AsRef<Array>, axis1: i32, axis2: i32) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_swapaxes(res, a.as_ref().as_ptr(), axis1, axis2, stream.as_ref().as_ptr())
+    })
+}
+
+/// Construct an array by repeating `a` the number of times given by `reps`.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `reps`: The number of repetitions along each axis.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_slice(&[1, 2, 3], &[3]);
+/// let y = tile(&x, &[2]);
+/// ```
+pub fn tile(a: impl AsRef<Array>, reps: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_tile(res, a.as_ref().as_ptr(), reps.as_ptr(), reps.len(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Transpose the dimensions of the array. Returns an error if the axes are invalid.
+///
+/// # Params
+///
+/// - `a`: The input array.
+/// - `axes`: Specifies the source axis for each axis in the new array. The default is to reverse
+///   the axes.
+///
+/// # Example
+///
+/// ```rust
+/// use ironbark_mlx::{Array, ops::*};
+///
+/// let x = Array::from_slice(&[1, 2, 3, 4, 5, 6], &[2, 3]);
+/// let y1 = transpose_axes(&x, &[0, 1]).unwrap();
+/// let y2 = transpose(&x).unwrap();
+/// ```
+///
+/// # See also
+///
+/// - [`transpose`]
+pub fn transpose_axes(a: impl AsRef<Array>, axes: &[i32]) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_transpose_axes(
+            res,
+            a.as_ref().as_ptr(),
+            axes.as_ptr(),
+            axes.len(),
+            stream.as_ref().as_ptr(),
+        )
+    })
+}
+
+/// Transpose with all axes reversed
+pub fn transpose(a: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_transpose(res, a.as_ref().as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+// The unit tests below are adapted from
+// https://github.com/ml-explore/mlx/blob/main/tests/ops_tests.cpp
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Array, Dtype, array,
+        test_utils::{assert_array_eq, tolerances},
+    };
+
+    use super::*;
+
+    #[test]
+    fn test_squeeze() {
+        let a = Array::zeros::<i32>(&[2, 1, 2, 1, 2, 1]).unwrap();
+        assert_eq!(squeeze_axes(&a, &[1, 3, 5][..]).unwrap().shape(), &[2, 2, 2]);
+        assert_eq!(squeeze_axes(&a, &[-1, -3, -5][..]).unwrap().shape(), &[2, 2, 2]);
+        assert_eq!(squeeze_axes(&a, &[1][..]).unwrap().shape(), &[2, 2, 1, 2, 1]);
+        assert_eq!(squeeze_axes(&a, &[-1][..]).unwrap().shape(), &[2, 1, 2, 1, 2]);
+
+        assert!(squeeze_axes(&a, &[0][..]).is_err());
+        assert!(squeeze_axes(&a, &[2][..]).is_err());
+        assert!(squeeze_axes(&a, &[1, 3, 1][..]).is_err());
+        assert!(squeeze_axes(&a, &[1, 3, -3][..]).is_err());
+    }
+
+    #[test]
+    fn test_expand_dims() {
+        let a = Array::zeros::<i32>(&[2, 2]).unwrap();
+        assert_eq!(expand_dims_axes(&a, &[0][..]).unwrap().shape(), &[1, 2, 2]);
+        assert_eq!(expand_dims_axes(&a, &[-1][..]).unwrap().shape(), &[2, 2, 1]);
+        assert_eq!(expand_dims_axes(&a, &[1][..]).unwrap().shape(), &[2, 1, 2]);
+        assert_eq!(expand_dims_axes(&a, &[0, 1, 2]).unwrap().shape(), &[1, 1, 1, 2, 2]);
+        assert_eq!(expand_dims_axes(&a, &[0, 1, 2, 5, 6, 7]).unwrap().shape(), &[1, 1, 1, 2, 2, 1, 1, 1]);
+
+        assert!(expand_dims_axes(&a, &[3]).is_err());
+        assert!(expand_dims_axes(&a, &[0, 1, 0]).is_err());
+        assert!(expand_dims_axes(&a, &[0, 1, -4]).is_err());
+    }
+
+    #[test]
+    fn test_flatten() {
+        let x = Array::zeros::<i32>(&[2, 3, 4]).unwrap();
+        assert_eq!(flatten(&x, None, None).unwrap().shape(), &[2 * 3 * 4]);
+
+        assert_eq!(flatten(&x, 1, 1).unwrap().shape(), &[2, 3, 4]);
+        assert_eq!(flatten(&x, 1, 2).unwrap().shape(), &[2, 3 * 4]);
+        assert_eq!(flatten(&x, 1, 3).unwrap().shape(), &[2, 3 * 4]);
+        assert_eq!(flatten(&x, 1, -1).unwrap().shape(), &[2, 3 * 4]);
+        assert_eq!(flatten(&x, -2, -1).unwrap().shape(), &[2, 3 * 4]);
+        assert_eq!(flatten(&x, -3, -1).unwrap().shape(), &[2 * 3 * 4]);
+        assert_eq!(flatten(&x, -4, -1).unwrap().shape(), &[2 * 3 * 4]);
+
+        assert!(flatten(&x, 2, 1).is_err());
+
+        assert!(flatten(&x, 5, 6).is_err());
+
+        assert!(flatten(&x, -5, -4).is_err());
+
+        let x = Array::from_int(1);
+        assert_eq!(flatten(&x, -3, -1).unwrap().shape(), &[1]);
+        assert_eq!(flatten(&x, 0, 0).unwrap().shape(), &[1]);
+    }
+
+    #[test]
+    fn test_unflatten() {
+        let a = array!([1, 2, 3, 4]);
+        let b = unflatten(&a, 0, &[2, -1]).unwrap();
+        let expected = array!([[1, 2], [3, 4]]);
+        assert_array_eq(b, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+    }
+
+    #[test]
+    fn test_reshape() {
+        let x = Array::from_int(1);
+        assert!(reshape(&x, &[]).unwrap().shape().is_empty());
+        assert!(reshape(&x, &[2]).is_err());
+        let y = reshape(&x, &[1, 1, 1]).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1]);
+        let y = reshape(&x, &[-1, 1, 1]).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1]);
+        let y = reshape(&x, &[1, 1, -1]).unwrap();
+        assert_eq!(y.shape(), &[1, 1, 1]);
+        assert!(reshape(&x, &[1, -1, -1]).is_err());
+        assert!(reshape(&x, &[2, -1]).is_err());
+
+        let x = Array::zeros::<i32>(&[2, 2, 2]).unwrap();
+        let y = reshape(&x, &[8]).unwrap();
+        assert_eq!(y.shape(), &[8]);
+        assert!(reshape(&x, &[7]).is_err());
+        let y = reshape(&x, &[-1]).unwrap();
+        assert_eq!(y.shape(), &[8]);
+        let y = reshape(&x, &[-1, 2]).unwrap();
+        assert_eq!(y.shape(), &[4, 2]);
+        assert!(reshape(&x, &[-1, 7]).is_err());
+
+        let x = Array::from_slice::<i32>(&[], &[0]);
+        let y = reshape(&x, &[0, 0, 0]).unwrap();
+        assert_eq!(y.shape(), &[0, 0, 0]);
+        y.eval().unwrap();
+        assert_eq!(y.size(), 0);
+        assert!(reshape(&x, &[]).is_err());
+        assert!(reshape(&x, &[1]).is_err());
+        let y = reshape(&x, &[1, 5, 0]).unwrap();
+        assert_eq!(y.shape(), &[1, 5, 0]);
+    }
+
+    #[test]
+    fn test_as_strided() {
+        let x = Array::from_iter(0..10, &[10]);
+        let y = as_strided(&x, &[3, 3][..], &[1, 1][..], 0).unwrap();
+        let expected = Array::from_slice(&[0, 1, 2, 1, 2, 3, 2, 3, 4], &[3, 3]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let y = as_strided(&x, &[3, 3][..], &[0, 3][..], 0).unwrap();
+        let expected = Array::from_slice(&[0, 3, 6, 0, 3, 6, 0, 3, 6], &[3, 3]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = x.reshape(&[2, 5]).unwrap();
+        let x = x.transpose_axes(&[1, 0][..]).unwrap();
+        let y = as_strided(&x, &[3, 3][..], &[2, 1][..], 1).unwrap();
+        let expected = Array::from_slice(&[5, 1, 6, 6, 2, 7, 7, 3, 8], &[3, 3]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+    }
+
+    #[test]
+    fn test_at_least_1d() {
+        let x = Array::from_int(1);
+        let out = at_least_1d(&x).unwrap();
+        assert_eq!(out.ndim(), 1);
+        assert_eq!(out.shape(), &[1]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let out = at_least_1d(&x).unwrap();
+        assert_eq!(out.ndim(), 1);
+        assert_eq!(out.shape(), &[3]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3, 1]);
+        let out = at_least_1d(&x).unwrap();
+        assert_eq!(out.ndim(), 2);
+        assert_eq!(out.shape(), &[3, 1]);
+    }
+
+    #[test]
+    fn test_at_least_2d() {
+        let x = Array::from_int(1);
+        let out = at_least_2d(&x).unwrap();
+        assert_eq!(out.ndim(), 2);
+        assert_eq!(out.shape(), &[1, 1]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let out = at_least_2d(&x).unwrap();
+        assert_eq!(out.ndim(), 2);
+        assert_eq!(out.shape(), &[1, 3]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3, 1]);
+        let out = at_least_2d(&x).unwrap();
+        assert_eq!(out.ndim(), 2);
+        assert_eq!(out.shape(), &[3, 1]);
+    }
+
+    #[test]
+    fn test_at_least_3d() {
+        let x = Array::from_int(1);
+        let out = at_least_3d(&x).unwrap();
+        assert_eq!(out.ndim(), 3);
+        assert_eq!(out.shape(), &[1, 1, 1]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let out = at_least_3d(&x).unwrap();
+        assert_eq!(out.ndim(), 3);
+        assert_eq!(out.shape(), &[1, 3, 1]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3, 1]);
+        let out = at_least_3d(&x).unwrap();
+        assert_eq!(out.ndim(), 3);
+        assert_eq!(out.shape(), &[3, 1, 1]);
+    }
+
+    #[test]
+    fn test_move_axis() {
+        let a = Array::from_int(0);
+        assert!(move_axis(&a, 0, 0).is_err());
+
+        let a = Array::zeros::<i32>(&[2]).unwrap();
+        assert!(move_axis(&a, 0, 1).is_err());
+        assert_eq!(move_axis(&a, 0, 0).unwrap().shape(), &[2]);
+        assert_eq!(move_axis(&a, -1, -1).unwrap().shape(), &[2]);
+
+        let a = Array::zeros::<i32>(&[2, 3, 4]).unwrap();
+        assert!(move_axis(&a, 0, -4).is_err());
+        assert!(move_axis(&a, 0, 3).is_err());
+        assert!(move_axis(&a, 3, 0).is_err());
+        assert!(move_axis(&a, -4, 0).is_err());
+        assert_eq!(move_axis(&a, 0, 2).unwrap().shape(), &[3, 4, 2]);
+        assert_eq!(move_axis(&a, 0, 1).unwrap().shape(), &[3, 2, 4]);
+        assert_eq!(move_axis(&a, 0, -1).unwrap().shape(), &[3, 4, 2]);
+        assert_eq!(move_axis(&a, -2, 2).unwrap().shape(), &[2, 4, 3]);
+    }
+
+    #[test]
+    fn test_concatenate() {
+        let a = Array::from_slice(&[1, 2, 3, 4], &[2, 2]);
+        let b = Array::from_slice(&[5, 6], &[1, 2]);
+        assert_eq!(concatenate(&[&a, &b], 0).unwrap().shape(), &[3, 2]);
+
+        let flat = concatenate_flat(&[&a, &b]).unwrap();
+        assert_eq!(flat.shape(), &[6]);
+        assert_eq!(flat.as_slice::<i32>(), &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_split_equal() {
+        let x = Array::from_int(3);
+        assert!(split_equal(&x, 0, 0).is_err());
+
+        let x = Array::from_slice(&[0, 1, 2], &[3]);
+        assert!(split_equal(&x, 3, 1).is_err());
+        assert!(split_equal(&x, -2, 1).is_err());
+
+        let out = split_equal(&x, 3, 0).unwrap();
+        assert_eq!(out.len(), 3);
+
+        let mut out = split_equal(&x, 3, -1).unwrap();
+        assert_eq!(out.len(), 3);
+        for (i, a) in out.iter_mut().enumerate() {
+            assert_eq!(a.shape(), &[1]);
+            assert_eq!(a.dtype(), Dtype::Int32);
+            assert_eq!(a.item_exact::<i32>(), i as i32);
+        }
+
+        let x = Array::from_slice(&[0, 1, 2, 3, 4, 5], &[2, 3]);
+        let out = split_equal(&x, 2, None).unwrap();
+        assert_array_eq(
+            &out[0],
+            Array::from_slice(&[0, 1, 2], &[1, 3]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+        assert_array_eq(
+            &out[1],
+            Array::from_slice(&[3, 4, 5], &[1, 3]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+
+        let out = split_equal(&x, 3, 1).unwrap();
+        assert_array_eq(&out[0], Array::from_slice(&[0, 3], &[2, 1]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+        assert_array_eq(&out[1], Array::from_slice(&[1, 4], &[2, 1]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+        assert_array_eq(&out[2], Array::from_slice(&[2, 5], &[2, 1]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = Array::zeros::<i32>(&[8, 12]).unwrap();
+        let out = split_equal(&x, 2, None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].shape(), &[4, 12]);
+        assert_eq!(out[1].shape(), &[4, 12]);
+
+        let out = split_equal(&x, 3, 1).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].shape(), &[8, 4]);
+        assert_eq!(out[1].shape(), &[8, 4]);
+        assert_eq!(out[2].shape(), &[8, 4]);
+    }
+
+    #[test]
+    fn test_split_at_indices() {
+        let x = Array::zeros::<i32>(&[8, 12]).unwrap();
+
+        let out = split_at_indices(&x, &[], None).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].shape(), x.shape());
+
+        let out = split_at_indices(&x, &[3, 7], None).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].shape(), &[3, 12]);
+        assert_eq!(out[1].shape(), &[4, 12]);
+        assert_eq!(out[2].shape(), &[1, 12]);
+
+        let out = split_at_indices(&x, &[20], None).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].shape(), &[8, 12]);
+        assert_eq!(out[1].shape(), &[0, 12]);
+
+        let out = split_at_indices(&x, &[-5], None).unwrap();
+        assert_eq!(out[0].shape(), &[3, 12]);
+        assert_eq!(out[1].shape(), &[5, 12]);
+
+        let out = split_at_indices(&x, &[2, 8], Some(1)).unwrap();
+        assert_eq!(out[0].shape(), &[8, 2]);
+        assert_eq!(out[1].shape(), &[8, 6]);
+        assert_eq!(out[2].shape(), &[8, 4]);
+
+        let x = Array::from_iter(0i32..5, &[5]);
+        let out = split_at_indices(&x, &[2, 1, 2], None).unwrap();
+        assert_array_eq(&out[0], Array::from_slice(&[0, 1], &[2]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+        assert_array_eq(&out[1], Array::from_slice::<i32>(&[], &[0]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+        assert_array_eq(&out[2], Array::from_slice(&[1], &[1]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+        assert_array_eq(&out[3], Array::from_slice(&[2, 3, 4], &[3]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+    }
+
+    #[test]
+    fn test_pad() {
+        let x = Array::zeros::<f32>(&[1, 2, 3]).unwrap();
+        assert_eq!(pad(&x, 1, None, None).unwrap().shape(), &[3, 4, 5]);
+        assert_eq!(pad(&x, (0, 1), None, None).unwrap().shape(), &[2, 3, 4]);
+        assert_eq!(pad(&x, &[(1, 1), (1, 2), (3, 1)], None, None).unwrap().shape(), &[3, 5, 7]);
+    }
+
+    #[test]
+    fn test_stack() {
+        let x = Array::from_slice::<f32>(&[], &[0]);
+        let x = vec![x];
+        assert_eq!(stack(&x, 0).unwrap().shape(), &[1, 0]);
+        assert_eq!(stack(&x, 1).unwrap().shape(), &[0, 1]);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let x = vec![x];
+        assert_eq!(stack(&x, 0).unwrap().shape(), &[1, 3]);
+        assert_eq!(stack(&x, 1).unwrap().shape(), &[3, 1]);
+
+        let y = Array::from_slice(&[4, 5, 6], &[3]);
+        let mut z = x;
+        z.push(y);
+        assert_eq!(stack(&z, 0).unwrap().shape(), &[2, 3]);
+        assert_eq!(stack(&z, 1).unwrap().shape(), &[3, 2]);
+        assert_eq!(stack(&z, -1).unwrap().shape(), &[3, 2]);
+        assert_eq!(stack(&z, -2).unwrap().shape(), &[2, 3]);
+
+        let empty: Vec<Array> = Vec::new();
+        assert!(stack(&empty, 0).is_err());
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]).as_dtype(Dtype::Float16).unwrap();
+        let y = Array::from_slice(&[4, 5, 6], &[3]).as_dtype(Dtype::Int32).unwrap();
+        assert_eq!(stack(&[x, y], 0).unwrap().dtype(), Dtype::Float16);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]).as_dtype(Dtype::Int32).unwrap();
+        let y = Array::from_slice(&[4, 5, 6, 7], &[4]).as_dtype(Dtype::Int32).unwrap();
+        assert!(stack(&[x, y], 0).is_err());
+    }
+
+    #[test]
+    fn contiguous_materializes_row_major_for_slice_observers() {
+        let input = Array::from_slice(&[1_i32, 2, 3, 4, 5, 6], &[2, 3]);
+        let transposed = input.transpose().unwrap();
+        assert!(matches!(transposed.try_as_slice::<i32>(), Err(crate::error::AsSliceError::NotContiguous)));
+
+        let contiguous = transposed.contiguous().unwrap();
+        assert_eq!(contiguous.try_as_slice::<i32>().unwrap(), &[1, 4, 2, 5, 3, 6]);
+        assert!(
+            bool::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::_mlx_array_is_row_contiguous(res, contiguous.as_ptr())
+            })
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn contiguous_options_can_retain_column_major_layout() {
+        let input = Array::from_slice(&[1_i32, 2, 3, 4, 5, 6], &[2, 3]);
+        let transposed = input.transpose().unwrap();
+        let contiguous = transposed.contiguous_with_options(ContiguousOptions { allow_col_major: true }).unwrap();
+        contiguous.eval().unwrap();
+
+        assert!(
+            !bool::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::_mlx_array_is_row_contiguous(res, contiguous.as_ptr())
+            })
+            .unwrap()
+        );
+        assert!(
+            bool::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::_mlx_array_is_col_contiguous(res, contiguous.as_ptr())
+            })
+            .unwrap()
+        );
+        assert!(matches!(contiguous.try_as_slice::<i32>(), Err(crate::error::AsSliceError::NotContiguous)));
+    }
+
+    #[test]
+    fn test_swap_axes() {
+        let a = Array::from_int(0);
+        assert!(swap_axes(&a, 0, 0).is_err());
+
+        let a = Array::zeros::<i32>(&[2]).unwrap();
+        assert!(swap_axes(&a, 0, 1).is_err());
+        assert_eq!(swap_axes(&a, 0, 0).unwrap().shape(), &[2]);
+        assert_eq!(swap_axes(&a, -1, -1).unwrap().shape(), &[2]);
+
+        let a = Array::zeros::<i32>(&[2, 3, 4]).unwrap();
+        assert!(swap_axes(&a, 0, -4).is_err());
+        assert!(swap_axes(&a, 0, 3).is_err());
+        assert!(swap_axes(&a, 3, 0).is_err());
+        assert!(swap_axes(&a, -4, 0).is_err());
+        assert_eq!(swap_axes(&a, 0, 2).unwrap().shape(), &[4, 3, 2]);
+        assert_eq!(swap_axes(&a, 0, 1).unwrap().shape(), &[3, 2, 4]);
+        assert_eq!(swap_axes(&a, 0, -1).unwrap().shape(), &[4, 3, 2]);
+        assert_eq!(swap_axes(&a, -2, 2).unwrap().shape(), &[2, 4, 3]);
+    }
+
+    #[test]
+    fn test_tile() {
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let y = tile(&x, &[2]).unwrap();
+        let expected = Array::from_slice(&[1, 2, 3, 1, 2, 3], &[6]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = Array::from_slice(&[1, 2, 3, 4], &[2, 2]);
+        let y = tile(&x, &[2]).unwrap();
+        let expected = Array::from_slice(&[1, 2, 1, 2, 3, 4, 3, 4], &[2, 4]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = Array::from_slice(&[1, 2, 3, 4], &[2, 2]);
+        let y = tile(&x, &[4, 1]).unwrap();
+        let expected = Array::from_slice(&[1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4], &[8, 2]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = Array::from_slice(&[1, 2, 3, 4], &[2, 2]);
+        let y = tile(&x, &[2, 2]).unwrap();
+        let expected = Array::from_slice(&[1, 2, 1, 2, 3, 4, 3, 4, 1, 2, 1, 2, 3, 4, 3, 4], &[4, 4]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let x = Array::from_slice(&[1, 2, 3], &[3]);
+        let y = tile(&x, &[2, 2, 2]).unwrap();
+        let expected =
+            Array::from_slice(&[1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3], &[2, 2, 6]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+    }
+
+    #[test]
+    fn test_transpose() {
+        let x = Array::from_int(1);
+        let y = transpose(&x).unwrap();
+        assert!(y.shape().is_empty());
+        assert_eq!(y.item_exact::<i32>(), 1);
+        assert!(transpose_axes(&x, &[0][..]).is_err());
+        assert!(transpose_axes(&x, &[1][..]).is_err());
+
+        let x = Array::from_slice(&[1], &[1]);
+        let y = transpose(&x).unwrap();
+        assert_eq!(y.shape(), &[1]);
+        assert_eq!(y.item_exact::<i32>(), 1);
+
+        let y = transpose_axes(&x, &[-1][..]).unwrap();
+        assert_eq!(y.shape(), &[1]);
+        assert_eq!(y.item_exact::<i32>(), 1);
+
+        assert!(transpose_axes(&x, &[1][..]).is_err());
+        assert!(transpose_axes(&x, &[0, 0][..]).is_err());
+
+        let x = Array::from_slice::<i32>(&[], &[0]);
+        let y = transpose(&x).unwrap();
+        assert_eq!(y.shape(), &[0]);
+        y.eval().unwrap();
+        assert_eq!(y.size(), 0);
+
+        let x = Array::from_slice(&[1, 2, 3, 4, 5, 6], &[2, 3]);
+        let mut y = transpose(&x).unwrap();
+        assert_eq!(y.shape(), &[3, 2]);
+        y = transpose_axes(&x, &[-1, 0][..]).unwrap();
+        assert_eq!(y.shape(), &[3, 2]);
+        y = transpose_axes(&x, &[-1, -2][..]).unwrap();
+        assert_eq!(y.shape(), &[3, 2]);
+        y.eval().unwrap();
+        assert_array_eq(
+            y,
+            Array::from_slice(&[1, 4, 2, 5, 3, 6], &[3, 2]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+
+        let y = transpose_axes(&x, &[0, 1][..]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_array_eq(y, &x, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let y = transpose_axes(&x, &[0, -1][..]).unwrap();
+        assert_eq!(y.shape(), &[2, 3]);
+        assert_array_eq(y, &x, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        assert!(transpose_axes(&x, &[][..]).is_err());
+        assert!(transpose_axes(&x, &[0][..]).is_err());
+        assert!(transpose_axes(&x, &[0, 0][..]).is_err());
+        assert!(transpose_axes(&x, &[0, 0, 0][..]).is_err());
+        assert!(transpose_axes(&x, &[0, 1, 1][..]).is_err());
+
+        let x = Array::from_slice(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], &[2, 3, 2]);
+        let y = transpose(&x).unwrap();
+        assert_eq!(y.shape(), &[2, 3, 2]);
+        let expected = Array::from_slice(&[1, 7, 3, 9, 5, 11, 2, 8, 4, 10, 6, 12], &[2, 3, 2]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let y = transpose_axes(&x, &[0, 1, 2][..]).unwrap();
+        assert_eq!(y.shape(), &[2, 3, 2]);
+        assert_array_eq(y, &x, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let y = transpose_axes(&x, &[1, 0, 2][..]).unwrap();
+        assert_eq!(y.shape(), &[3, 2, 2]);
+        let expected = Array::from_slice(&[1, 2, 7, 8, 3, 4, 9, 10, 5, 6, 11, 12], &[3, 2, 2]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let y = transpose_axes(&x, &[0, 2, 1][..]).unwrap();
+        assert_eq!(y.shape(), &[2, 2, 3]);
+        let expected = Array::from_slice(&[1, 3, 5, 2, 4, 6, 7, 9, 11, 8, 10, 12], &[2, 2, 3]);
+        assert_array_eq(y, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let mut x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7], &[4, 2]);
+        x = reshape(transpose(&x).unwrap(), &[2, 2, 2]).unwrap();
+        let expected = Array::from_slice(&[0, 2, 4, 6, 1, 3, 5, 7], &[2, 2, 2]);
+        assert_array_eq(x, expected, tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let mut x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7], &[1, 4, 1, 2]);
+        // assert!(x.flags().row_contiguous);
+        x = transpose_axes(&x, &[2, 1, 0, 3][..]).unwrap();
+        x.eval().unwrap();
+        // assert!(x.flags().row_contiguous);
+    }
+}

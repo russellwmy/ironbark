@@ -1,0 +1,428 @@
+use std::ffi::CString;
+
+use crate::utils::VectorArray;
+use crate::utils::guard::Guarded;
+use crate::{
+    Array, Dtype, Stream,
+    error::{Exception, Result},
+};
+
+/// Diagonal selection and dtype control for [`Array::trace`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TraceOptions {
+    /// Diagonal offset.
+    pub offset: i32,
+
+    /// First matrix axis.
+    pub axis1: i32,
+
+    /// Second matrix axis.
+    pub axis2: i32,
+
+    /// Dtype used before reduction.
+    pub dtype: Option<Dtype>,
+}
+
+impl Default for TraceOptions {
+    fn default() -> Self {
+        Self {
+            offset: 0,
+            axis1: 0,
+            axis2: 1,
+            dtype: None,
+        }
+    }
+}
+
+impl Array {
+    /// Sum a selected diagonal.
+    ///
+    /// The diagonal is cast to the requested dtype before reduction. Reduction promotion can
+    /// therefore produce a different final dtype.
+    ///
+    /// ```rust
+    /// use ironbark_mlx::{array, ops::TraceOptions, Dtype};
+    ///
+    /// let result = array!([[1.0, 2.0], [3.0, 4.0]])
+    ///     .trace(TraceOptions {
+    ///         dtype: Some(Dtype::Int32),
+    ///         ..TraceOptions::default()
+    ///     })
+    ///     .unwrap();
+    /// assert!(result.shape().is_empty());
+    /// ```
+    pub fn trace(&self, options: TraceOptions) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        if options == TraceOptions::default() {
+            Array::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::mlx_trace(res, self.as_ptr(), stream.as_ref().as_ptr())
+            })
+        } else {
+            Array::try_from_op(|res| unsafe {
+                ironbark_mlx_sys::mlx_trace_axes(
+                    res,
+                    self.as_ptr(),
+                    options.offset,
+                    options.axis1,
+                    options.axis2,
+                    options.dtype.unwrap_or_else(|| self.dtype()).into(),
+                    stream.as_ref().as_ptr(),
+                )
+            })
+        }
+    }
+
+    /// Extract a diagonal or construct a diagonal matrix.
+    ///
+    /// If self is 1-D then a diagonal matrix is constructed with self on the `k`-th diagonal. If
+    /// self is 2-D then the `k`-th diagonal is returned.
+    ///
+    /// # Params:
+    ///
+    /// - `k`: the diagonal to extract or construct
+    /// - `stream`: stream or device to evaluate on
+    pub fn diag(&self, k: impl Into<Option<i32>>) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        Array::try_from_op(|res| unsafe {
+            ironbark_mlx_sys::mlx_diag(res, self.as_ptr(), k.into().unwrap_or(0), stream.as_ref().as_ptr())
+        })
+    }
+
+    /// Compatibility shim for [`diag`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `diag`")]
+    pub fn diag_device(&self, k: impl Into<Option<i32>>, stream: impl AsRef<Stream>) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.diag(k))
+    }
+
+    /// Return specified diagonals.
+    ///
+    /// If self is 2-D, then a 1-D array containing the diagonal at the given `offset` is returned.
+    ///
+    /// If self has more than two dimensions, then `axis1` and `axis2` determine the 2D subarrays
+    /// from which diagonals are extracted. The new shape is the original shape with `axis1` and
+    /// `axis2` removed and a new dimension inserted at the end corresponding to the diagonal.
+    ///
+    /// # Params:
+    ///
+    /// - `offset`: offset of the diagonal.  Can be positive or negative
+    /// - `axis1`: first axis of the 2-D sub-array from which the diagonals should be taken
+    /// - `axis2`: second axis of the 2-D sub-array from which the diagonals should be taken
+    /// - `stream`: stream or device to evaluate on
+    pub fn diagonal(
+        &self,
+        offset: impl Into<Option<i32>>,
+        axis1: impl Into<Option<i32>>,
+        axis2: impl Into<Option<i32>>,
+    ) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        Array::try_from_op(|res| unsafe {
+            ironbark_mlx_sys::mlx_diagonal(
+                res,
+                self.as_ptr(),
+                offset.into().unwrap_or(0),
+                axis1.into().unwrap_or(0),
+                axis2.into().unwrap_or(1),
+                stream.as_ref().as_ptr(),
+            )
+        })
+    }
+
+    /// Compatibility shim for [`diagonal`].
+    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `diagonal`")]
+    pub fn diagonal_device(
+        &self,
+        offset: impl Into<Option<i32>>,
+        axis1: impl Into<Option<i32>>,
+        axis2: impl Into<Option<i32>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.diagonal(offset, axis1, axis2))
+    }
+
+    /// Perform the Walsh-Hadamard transform along the final axis.
+    ///
+    /// Supports sizes `n = m*2^k` for `m` in `(1, 12, 20, 28)` and `2^k <= 8192`
+    /// for ``DType/float32`` and `2^k <= 16384` for ``DType/float16`` and ``DType/bfloat16``.
+    ///
+    /// # Params
+    /// - scale: scale the output by this factor -- default is `1.0/sqrt(array.dim(-1))`
+    /// - stream: stream to evaluate on.
+    pub fn hadamard_transform(&self, scale: impl Into<Option<f32>>) -> Result<Array> {
+        let stream = Stream::thread_local_or_default();
+        let scale = scale.into();
+        let scale = ironbark_mlx_sys::mlx_optional_float {
+            value: scale.unwrap_or(0.0),
+            has_value: scale.is_some(),
+        };
+
+        Array::try_from_op(|res| unsafe {
+            ironbark_mlx_sys::mlx_hadamard_transform(res, self.as_ptr(), scale, stream.as_ref().as_ptr())
+        })
+    }
+
+    /// Compatibility shim for [`hadamard_transform`].
+    #[deprecated(
+        since = "0.26.0",
+        note = "use `with_stream` or `with_device` around `hadamard_transform`"
+    )]
+    pub fn hadamard_transform_device(
+        &self,
+        scale: impl Into<Option<f32>>,
+        stream: impl AsRef<Stream>,
+    ) -> Result<Array> {
+        crate::with_stream(stream.as_ref(), || self.hadamard_transform(scale))
+    }
+}
+
+/// See [`Array::diag`]
+pub fn diag(a: impl AsRef<Array>, k: impl Into<Option<i32>>) -> Result<Array> {
+    a.as_ref().diag(k)
+}
+
+/// See [`Array::diagonal`]
+pub fn diagonal(
+    a: impl AsRef<Array>,
+    offset: impl Into<Option<i32>>,
+    axis1: impl Into<Option<i32>>,
+    axis2: impl Into<Option<i32>>,
+) -> Result<Array> {
+    a.as_ref().diagonal(offset, axis1, axis2)
+}
+
+/// Perform the Einstein summation convention on the operands.
+///
+/// # Params
+///
+/// - subscripts: Einstein summation convention equation
+/// - operands: input arrays
+/// - stream: stream or device to evaluate on
+pub fn einsum<'a>(subscripts: &str, operands: impl IntoIterator<Item = &'a Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    let c_subscripts = CString::new(subscripts).map_err(|_| Exception::from("Invalid subscripts"))?;
+    let c_operands = VectorArray::try_from_iter(operands.into_iter())?;
+
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_einsum(res, c_subscripts.as_ptr(), c_operands.as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+/// Perform the Kronecker product of two arrays.
+///
+/// # Params
+///
+/// - `a`: first array
+/// - `b`: second array
+/// - `stream`: stream or device to evaluate on
+pub fn kron(a: impl AsRef<Array>, b: impl AsRef<Array>) -> Result<Array> {
+    let stream = Stream::thread_local_or_default();
+    Array::try_from_op(|res| unsafe {
+        ironbark_mlx_sys::mlx_kron(res, a.as_ref().as_ptr(), b.as_ref().as_ptr(), stream.as_ref().as_ptr())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        Array, array,
+        ops::{arange, diag, einsum, reshape},
+        test_utils::{assert_array_eq, assert_array_eq_with_context, tolerances},
+    };
+    use pretty_assertions::assert_eq;
+
+    use super::diagonal;
+
+    #[test]
+    fn test_diagonal() {
+        let x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7], &[4, 2]);
+        let out = diagonal(&x, None, None, None).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([0, 3]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "default 2d diagonal",
+        );
+
+        assert!(diagonal(&x, 1, 6, 0).is_err());
+        assert!(diagonal(&x, 1, 0, -3).is_err());
+
+        let x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[3, 4]);
+        let out = diagonal(&x, 2, 1, 0).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([8]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "positive offset with swapped axes",
+        );
+
+        let out = diagonal(&x, -1, 0, 1).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([4, 9]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "negative offset",
+        );
+
+        let out = diagonal(&x, -5, 0, 1).unwrap();
+        out.eval().unwrap();
+        assert_eq!(out.shape(), &[0]);
+
+        let x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], &[3, 2, 2]);
+        let out = diagonal(&x, 1, 0, 1).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([[2], [3]]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "3d positive offset",
+        );
+
+        let out = diagonal(&x, 0, 2, 0).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([[0, 5], [2, 7]]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "3d axes 2 and 0",
+        );
+
+        let out = diagonal(&x, 1, -1, 0).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!([[4, 9], [6, 11]]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "3d negative axis",
+        );
+
+        let x = reshape(arange::<_, f32>(None, 16, None).unwrap(), &[2, 2, 2, 2]).unwrap();
+        let out = diagonal(&x, 0, 0, 1).unwrap();
+        assert_array_eq_with_context(
+            out,
+            Array::from_slice(&[0.0, 12.0, 1.0, 13.0, 2.0, 14.0, 3.0, 15.0], &[2, 2, 2]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "float32 diagonal axes",
+        );
+
+        assert!(diagonal(&x, 0, 1, 1).is_err());
+
+        let x = array!([0, 1]);
+        assert!(diagonal(&x, 0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn test_diag() {
+        // Too few or too many dimensions
+        assert!(diag(Array::from_f32(0.0), None).is_err());
+        assert!(diag(Array::from_slice(&[0.0], &[1, 1, 1]), None).is_err());
+
+        // Test with 1D array
+        let x = array!([0, 1, 2, 3]);
+        let out = diag(&x, 0).unwrap();
+        assert_array_eq(
+            out,
+            array!([[0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 2, 0], [0, 0, 0, 3]]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+
+        let out = diag(&x, 1).unwrap();
+        assert_array_eq(
+            out,
+            array!([
+                [0, 0, 0, 0, 0],
+                [0, 0, 1, 0, 0],
+                [0, 0, 0, 2, 0],
+                [0, 0, 0, 0, 3],
+                [0, 0, 0, 0, 0]
+            ]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+
+        let out = diag(&x, -1).unwrap();
+        assert_array_eq(
+            out,
+            array!([
+                [0, 0, 0, 0, 0],
+                [0, 0, 0, 0, 0],
+                [0, 1, 0, 0, 0],
+                [0, 0, 2, 0, 0],
+                [0, 0, 0, 3, 0]
+            ]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+
+        // Test with 2D array
+        let x = Array::from_slice(&[0, 1, 2, 3, 4, 5, 6, 7, 8], &[3, 3]);
+        let out = diag(&x, 0).unwrap();
+        assert_array_eq(out, array!([0, 4, 8]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let out = diag(&x, 1).unwrap();
+        assert_array_eq(out, array!([1, 5]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        let out = diag(&x, -1).unwrap();
+        assert_array_eq(out, array!([3, 7]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+    }
+
+    #[test]
+    fn test_einsum() {
+        // Test dot product (vector-vector)
+        let a = array!([0.0, 1.0, 2.0, 3.0]);
+        let b = array!([4.0, 5.0, 6.0, 7.0]);
+        let out = einsum("i,i->", &[a, b]).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!(38.0),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "float32 vector dot",
+        );
+
+        // Test trace (diagonal sum)
+        let m = array!([[1, 2], [3, 4]]);
+        let out = einsum("ii->", &[m]).unwrap();
+        assert_array_eq_with_context(
+            out,
+            array!(5),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+            "int32 matrix trace",
+        );
+    }
+
+    #[test]
+    fn test_hadamard_transform() {
+        let input = Array::from_slice(&[1.0, -1.0, -1.0, 1.0], &[2, 2]);
+        let expected = Array::from_slice(&[0.0, 2.0_f32 / 2.0_f32.sqrt(), 0.0, -2.0_f32 / 2.0_f32.sqrt()], &[2, 2]);
+        let result = input.hadamard_transform(None).unwrap();
+
+        let c = result.all_close(&expected, 1e-5, 1e-5, None).unwrap();
+        assert!(c);
+    }
+
+    // This test is adapted from the python unit test `mlx/test/test_ops.py` `test_kron`
+    #[test]
+    fn test_kron() {
+        // Basic vector test
+        let x = array!([1, 2]);
+        let y = array!([3, 4]);
+        let z = super::kron(&x, &y).unwrap();
+        assert_array_eq(z, array!([3, 4, 6, 8]), tolerances::EXACT.rtol, tolerances::EXACT.atol);
+
+        // Basic matrix test
+        let x = array!([[1, 2], [3, 4]]);
+        let y = array!([[0, 5], [6, 7]]);
+        let z = super::kron(&x, &y).unwrap();
+        assert_array_eq(
+            z,
+            array!([[0, 5, 0, 10], [6, 7, 12, 14], [0, 15, 0, 20], [18, 21, 24, 28]]),
+            tolerances::EXACT.rtol,
+            tolerances::EXACT.atol,
+        );
+    }
+}

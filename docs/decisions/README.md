@@ -89,3 +89,4 @@ Skip it for small, local, easy-to-undo choices.
 |---|---|---|---|
 | [0000](0000-template.md) | Template | — | — |
 | [0001](0001-ternary-moe-streaming.md) | Save RAM with a ternary MoE streamed by ironbark | Accepted | 2026-10-14 |
+| [0002](0002-own-mlx-bindings.md) | Own the MLX bindings in house (ironbark-mlx) | Accepted | 2026-10-16 |

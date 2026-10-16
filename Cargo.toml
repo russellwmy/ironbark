@@ -1,7 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["crates/ironbark", "crates/ironbark-cli", "crates/ironbark-experts", "crates/ironbark-fetch", "crates/ironbark-ffi", "crates/ironbark-mlx"]
-exclude = ["vendor"]
+members = [
+    "crates/ironbark",
+    "crates/ironbark-cli",
+    "crates/ironbark-engine",
+    "crates/ironbark-experts",
+    "crates/ironbark-fetch",
+    "crates/ironbark-ffi",
+    "crates/ironbark-mlx",
+    "crates/ironbark-mlx-sys",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -49,13 +57,13 @@ float_cmp_const = "warn"
 ironbark = { version = "0.1.0", path = "crates/ironbark" }
 ironbark-experts = { version = "0.1.0", path = "crates/ironbark-experts" }
 ironbark-fetch = { version = "0.1.0", path = "crates/ironbark-fetch" }
+ironbark-engine = { version = "0.1.0", path = "crates/ironbark-engine" }
 ironbark-mlx = { version = "0.1.0", path = "crates/ironbark-mlx" }
+ironbark-mlx-sys = { version = "0.1.0", path = "crates/ironbark-mlx-sys" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 half = "2"
 libc = "0.2"
-mlx-rs = "0.32"
-mlx-sys = "0.6"
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
@@ -70,6 +78,3 @@ opt-level = 2
 [profile.release]
 debug = false
 
-# mlx-sys 0.6 with iOS support: iOS SDK for the Metal kernels, iOS clang runtime.
-[patch.crates-io]
-mlx-sys = { path = "vendor/mlx-sys" }

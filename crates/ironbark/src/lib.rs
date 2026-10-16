@@ -18,7 +18,7 @@
 //! ```
 //!
 //! ```text
-//!   Session ── chat / start + next_piece ──▶ Model (ironbark-mlx: MLX, custom Metal kernels)
+//!   Session ── chat / start + next_piece ──▶ Model (ironbark-engine: MLX, custom Metal kernels)
 //!      │                                        └─▶ Store (ironbark-experts: expert cache, loader threads)
 //!      └── plan: budget from the device -> experts per layer
 //! ```
@@ -27,18 +27,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use mlx_rs::ops::indexing::argmax_axis;
-use mlx_rs::transforms::async_eval;
-use mlx_rs::{Array, Dtype};
+use ironbark_mlx::ops::indexing::argmax_axis;
+use ironbark_mlx::transforms::async_eval;
+use ironbark_mlx::{Array, Dtype};
 use tokenizers::Tokenizer;
 
+pub use ironbark_engine::bench::{ExpertStats, Generation, ReadProbe};
+pub use ironbark_engine::device::{Footprint, Hardware};
+pub use ironbark_engine::manifest::{Report, verify};
+pub use ironbark_engine::plan::Plan;
+pub use ironbark_engine::profile::Profile;
+pub use ironbark_engine::{Config, KvSnapshot, Model, pack};
 pub use ironbark_experts::{Chunks, Records};
-pub use ironbark_mlx::bench::{ExpertStats, Generation, ReadProbe};
-pub use ironbark_mlx::device::{Footprint, Hardware};
-pub use ironbark_mlx::manifest::{Report, verify};
-pub use ironbark_mlx::plan::Plan;
-pub use ironbark_mlx::profile::Profile;
-pub use ironbark_mlx::{Config, KvSnapshot, Model, pack};
 pub use serde_json::{Value, json};
 pub use tools::{Message, Parsed, ToolCall, parse};
 
@@ -49,10 +49,10 @@ pub mod tools;
 pub enum Error {
     /// Loading or running the model failed.
     #[error(transparent)]
-    Model(#[from] ironbark_mlx::Error),
+    Model(#[from] ironbark_engine::Error),
     /// An MLX operation failed.
     #[error(transparent)]
-    Mlx(#[from] mlx_rs::error::Exception),
+    Mlx(#[from] ironbark_mlx::error::Exception),
     /// The tokenizer failed.
     #[error("tokenizer: {0}")]
     Tokenizer(String),
@@ -98,7 +98,7 @@ impl Default for Options {
         Self {
             budget: None,
             slots: None,
-            max_context: ironbark_mlx::plan::CONTEXT,
+            max_context: ironbark_engine::plan::CONTEXT,
             loaders: 8,
             records: None,
             embed: None,
@@ -190,14 +190,14 @@ impl Session {
     pub fn open(dir: impl AsRef<Path>, options: Options) -> Result<Self> {
         let dir = dir.as_ref();
         let hw = Hardware::detect();
-        let budget = options.budget.unwrap_or_else(|| ironbark_mlx::plan::budget(&hw));
+        let budget = options.budget.unwrap_or_else(|| ironbark_engine::plan::budget(&hw));
         let mut plan = Plan::new(dir, budget, options.max_context)?;
         if let Some(slots) = options.slots {
             plan.slots = slots;
         }
         // MLX keeps freed GPU buffers for reuse; unlimited, they hold prefill temporaries (4–5
         // GB of footprint at 64 experts per layer), which iOS counts against the app.
-        mlx_rs::memory::set_cache_limit(plan.buffer_cache as usize)?;
+        ironbark_mlx::memory::set_cache_limit(plan.buffer_cache as usize)?;
         let mut model = match options.records {
             Some(r) => Model::load_records(dir, plan.slots, options.loaders, r)?,
             None => Model::load_streaming(dir, dir, plan.slots, options.loaders)?,
@@ -233,7 +233,7 @@ impl Session {
         &self.hw
     }
 
-    /// The model, for lower-level use (`ironbark-mlx`).
+    /// The model, for lower-level use (`ironbark-engine`).
     #[must_use]
     pub fn model(&self) -> &Model {
         &self.model
@@ -285,7 +285,7 @@ impl Session {
                 max: self.max_context,
             });
         }
-        let g = ironbark_mlx::bench::generate(&mut self.model, &ids, tokens)?;
+        let g = ironbark_engine::bench::generate(&mut self.model, &ids, tokens)?;
         self.model.reset();
         Ok(g)
     }
@@ -401,7 +401,7 @@ impl Session {
     pub fn start(&mut self, text: &str, reset: bool) -> Result<usize> {
         let ids = self.encode(text)?;
         if ids.is_empty() {
-            return Err(ironbark_mlx::Error::Format("empty text".into()).into());
+            return Err(ironbark_engine::Error::Format("empty text".into()).into());
         }
         if reset {
             self.reset();
@@ -418,7 +418,7 @@ impl Session {
         let next = pick(&logits)?;
         next.eval()?;
         let prefill_s = t.elapsed().as_secs_f64();
-        ironbark_mlx::bench::reset_stats(&mut self.model);
+        ironbark_engine::bench::reset_stats(&mut self.model);
         self.turn = Some(Turn {
             next,
             tokens: Vec::new(),
@@ -491,7 +491,7 @@ impl Session {
             decode_tps: tokens as f64 / decode_s.max(1e-9),
             context: self.model.pos,
             experts: ExpertStats::of(&self.model, tokens),
-            footprint: ironbark_mlx::device::footprint(),
+            footprint: ironbark_engine::device::footprint(),
         }
     }
 

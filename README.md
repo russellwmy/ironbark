@@ -23,34 +23,37 @@ ironbark/
 ├── Cargo.toml          workspace: members, shared deps, profiles
 ├── crates/
 │   ├── ironbark/           library: Session (open sized to the device, chat, tools)
-│   ├── ironbark-mlx/       Maple decode on the GPU (mlx-rs)
+│   ├── ironbark-engine/    Maple decode on the GPU
 │   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
 │   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
 │   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
-│   └── ironbark-cli/       binary `ironbark`: pack, verify, gen, ppl, profile
+│   ├── ironbark-cli/       binary `ironbark`: pack, verify, gen, ppl, profile
+│   ├── ironbark-mlx/       safe Rust API over MLX
+│   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                IronbarkBench: SwiftUI benchmark app (xcodegen)
 ├── models/             (gitignored) Maple checkpoint and packs, from scripts/setup.sh
 ├── prompts/            prompt texts for perplexity and benchmarks (prose, rust)
 ├── scripts/setup.sh    download Maple, build, pack, verify
-├── vendor/mlx-sys/     mlx-sys 0.6 patched to build for iOS (see IRONBARK.md)
 └── docs/decisions/     decision records
 ```
 
 ```
  ironbark-cli ─────────────────────┐
- ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-mlx ──▶ mlx-rs (MLX 0.32, Metal)
-    ├──────────────────────────────┘      └──▶ ironbark-experts (streamed experts: slab wrapped as one MLX array, no copy)
+ ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-engine ──▶ ironbark-mlx (MLX 0.32, Metal)
+    ├──────────────────────────────┘         └──▶ ironbark-experts (streamed experts: slab wrapped as one MLX array, no copy)
     └──▶ ironbark-fetch ──▶ ironbark-experts (only the Records trait, layout, hash)
 ```
 
 | Crate | What |
 |---|---|
 | `ironbark` | Library: `Session::open` sized to the device, chat and tool turns, `parse` for tool calls |
-| `ironbark-mlx` | Loads `deepgrove/maple-preview-2bit-mlx` or a packed dir; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
+| `ironbark-engine` | Loads `deepgrove/maple-preview-2bit-mlx` or a packed dir; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
 | `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
 | `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
 | `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
 | `ironbark-cli` | `ironbark pack` (experts -> `experts.bin`), `verify`, `gen` (greedy decode, speed, memory), `ppl` (perplexity), `profile`; `--experts DIR` streams experts (`--cache N`, `--budget GB`, `--loaders`, `--lookahead`) |
+| `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
+| `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.2 and its Metal kernels for macOS and iOS |
 
 ## Design
 
@@ -122,15 +125,12 @@ The first build compiles MLX from source (about 15 min).
 
 ## Usage
 
-The crates are not on crates.io (`publish = false`), so depend on them by path or git. They need Rust 1.99+. Cargo applies `[patch]` only from your own workspace root, so for iOS also patch `mlx-sys` (stock 0.6 builds MLX's kernels for macOS only):
+The crates are not on crates.io (`publish = false`), so depend on them by path or git. They need Rust 1.99+. iOS needs nothing extra: `ironbark-mlx-sys` builds MLX's kernels for iOS.
 
 ```toml
 [dependencies]
 ironbark = { path = "../ironbark/crates/ironbark" }
 ironbark-fetch = { path = "../ironbark/crates/ironbark-fetch" }   # only for on-demand experts
-
-[patch.crates-io]
-mlx-sys = { path = "../ironbark/vendor/mlx-sys" }                 # only for iOS
 ```
 
 ```
@@ -338,7 +338,7 @@ Output is the same as the local pack in every run. The first query's time goes t
 
 | Piece | Note |
 |---|---|
-| MLX for iOS | MLX 0.32.2 hardcodes `-sdk macosx` for its kernels; `vendor/mlx-sys` patches it to `iphoneos`. The app targets iOS 26.2+ (Metal 4, for MLX's NAX prefill kernels; `IOS_MIN` in `ios/build.sh`); mlx-sys alone defaults to iOS 18 |
+| MLX for iOS | MLX 0.32.2 hardcodes `-sdk macosx` for its kernels; `ironbark-mlx-sys` patches it to `iphoneos`. The app targets iOS 26.2+ (Metal 4, for MLX's NAX prefill kernels; `IOS_MIN` in `ios/build.sh`); `ironbark-mlx-sys` alone defaults to iOS 18 |
 | Metal kernels | `mlx.metallib` (136 MB) sits next to the app binary, where MLX looks first |
 | Memory | iOS limits the process footprint. MLX's cache of freed buffers held 2.5–3.5 GB of prefill temporaries (footprint 5.2 GB at 64 experts per layer); the plan caps it (0 or 256 MB), same speed |
 
@@ -500,5 +500,5 @@ It raises the effective hit rate (prose at 64: 74.7% → 89.4%) at the cost of m
 | What | License |
 |---|---|
 | ironbark code | MIT OR Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)) |
-| `vendor/mlx-sys` | MIT OR Apache-2.0 (upstream mlx-sys) |
+| `crates/ironbark-mlx*` | MIT OR Apache-2.0; based on mlx-rs 0.32 by the mlx-rs authors ([DR-0002](docs/decisions/0002-own-mlx-bindings.md)) |
 | Maple weights (not in this repo) | MIT, DeepGrove; `ironbark pack` copies its `LICENSE` into every pack |

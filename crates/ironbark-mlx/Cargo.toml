@@ -1,24 +1,42 @@
 [package]
 name = "ironbark-mlx"
-description = "Ternary MoE (Maple) decode on the Apple GPU through MLX"
+description = "Safe Rust API over MLX: arrays, ops, transforms, nn, optimizers"
 version.workspace = true
-edition.workspace = true
+edition = "2021"
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-readme.workspace = true
-keywords = ["moe", "ternary", "mlx", "metal", "apple-silicon"]
-categories = ["science"]
 publish.workspace = true
+readme = "README.md"
+keywords = ["mlx", "metal", "apple-silicon", "machine-learning"]
+categories = ["science"]
+
+[package.metadata.docs.rs]
+targets = ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"]
+
+[features]
+default = ["accelerate", "metal"]
+accelerate = ["ironbark-mlx-sys/accelerate"]
+metal = ["ironbark-mlx-sys/metal"]
+# Conversion between `Array` and `safetensors::TensorView`
+safetensors = ["dep:safetensors", "dep:bytemuck"]
 
 [dependencies]
-ironbark-experts.workspace = true
+ironbark-mlx-sys.workspace = true
+bytemuck = { version = "1", features = ["extern_crate_std"], optional = true }
 half.workspace = true
 libc.workspace = true
-mlx-rs.workspace = true
-mlx-sys.workspace = true
-serde_json.workspace = true
+mach-sys = "0.5"
+num-complex = "0.4"
+num-traits = "0.2"
+num_enum = "0.7"
+paste = "1"
+safetensors = { version = "0.8", optional = true }
+smallvec = "1"
+strum = { version = "0.28", features = ["derive"] }
 thiserror.workspace = true
 
-[lints]
-workspace = true
+[dev-dependencies]
+float_eq = "1"
+pretty_assertions = "1.4.0"
+tempfile = "3"

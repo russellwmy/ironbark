@@ -1,0 +1,24 @@
+[package]
+name = "ironbark-engine"
+description = "Ternary MoE (Maple) decode on the Apple GPU through MLX"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["moe", "ternary", "mlx", "metal", "apple-silicon"]
+categories = ["science"]
+publish.workspace = true
+
+[dependencies]
+ironbark-experts.workspace = true
+half.workspace = true
+libc.workspace = true
+ironbark-mlx.workspace = true
+ironbark-mlx-sys.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

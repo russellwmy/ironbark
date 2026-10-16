@@ -1,0 +1,25 @@
+[package]
+name = "ironbark-mlx-sys"
+description = "Rust bindings to mlx-c; builds MLX and its Metal kernels for macOS and iOS"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "README.md"
+keywords = ["mlx", "metal", "apple-silicon", "ios"]
+categories = ["external-ffi-bindings", "science"]
+
+[package.metadata.docs.rs]
+targets = ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"]
+
+[features]
+default = ["accelerate", "metal"]
+accelerate = []
+metal = []
+
+[build-dependencies]
+bindgen = "0.72.1"
+cc = "1"
+cmake = "0.1"

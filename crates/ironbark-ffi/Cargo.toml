@@ -17,8 +17,8 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 ironbark.workspace = true
 ironbark-fetch.workspace = true
+ironbark-engine.workspace = true
 ironbark-mlx.workspace = true
-mlx-rs.workspace = true
 serde_json.workspace = true
 
 [lints]
