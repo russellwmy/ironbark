@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords = ["moe", "experts", "download", "llm"]
+categories = ["science"]
 publish.workspace = true
 
 [dependencies]

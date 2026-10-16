@@ -8,6 +8,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/russellwmy/ironbark"
+readme = "README.md"
 publish = false
 
 [workspace.lints.rust]
@@ -44,10 +46,10 @@ lossy_float_literal = "warn"
 float_cmp_const = "warn"
 
 [workspace.dependencies]
-ironbark = { path = "crates/ironbark" }
-ironbark-experts = { path = "crates/ironbark-experts" }
-ironbark-fetch = { path = "crates/ironbark-fetch" }
-ironbark-mlx = { path = "crates/ironbark-mlx" }
+ironbark = { version = "0.1.0", path = "crates/ironbark" }
+ironbark-experts = { version = "0.1.0", path = "crates/ironbark-experts" }
+ironbark-fetch = { version = "0.1.0", path = "crates/ironbark-fetch" }
+ironbark-mlx = { version = "0.1.0", path = "crates/ironbark-mlx" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 half = "2"
