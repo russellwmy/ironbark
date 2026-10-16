@@ -26,6 +26,7 @@ More: [ARCHITECTURE.md](https://github.com/russellwmy/ironbark/blob/main/ARCHITE
   - [Expert options](#expert-options)
   - [Examples](#examples)
   - [Development](#development)
+  - [Release](#release)
 - [Usage](#usage)
   - [Chat](#chat) · [Options](#options) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Experts from a server](#experts-from-a-server)
 - [Tool use](#tool-use)
@@ -145,6 +146,25 @@ cargo clippy --workspace --all-targets --release -- -D warnings
 IRONBARK_MODEL=$P cargo test --workspace --release -- --test-threads=1   # without IRONBARK_MODEL the model tests are skipped
 cargo deny check
 ```
+
+### Release
+
+Pushing a version tag publishes the crates to crates.io (`.github/workflows/publish.yml`, macOS runner):
+
+```
+ bump version ──▶ commit, push ──▶ git tag vX.Y.Z ──▶ git push origin vX.Y.Z
+                                                          │
+                                                          ▼
+                        tag == workspace version? ──▶ cargo publish --workspace (all but ironbark-ffi)
+```
+
+| Step | How |
+|---|---|
+| Once | Add a crates.io API token as the repo secret `CARGO_REGISTRY_TOKEN` (scopes: publish-new, publish-update) |
+| Bump | `version` in `[workspace.package]` and in `[workspace.dependencies]` of the root `Cargo.toml` |
+| Tag | `git tag v0.1.0 && git push origin v0.1.0`: the tag must equal the version, or the job fails before publishing |
+
+A crates.io version can be yanked, not deleted. If a run stops partway, the crates already published stay; bump the version and tag again.
 
 ## Usage
 
@@ -486,6 +506,7 @@ Streaming experts (`--experts`): per layer, the router's choice is read back on 
 
 ```
 ironbark/
+├── .github/workflows/  publish.yml: crates.io release on a version tag
 ├── Cargo.toml          workspace: members, shared deps, profiles
 ├── ARCHITECTURE.md     design
 ├── STYLE.md            code style and checks
