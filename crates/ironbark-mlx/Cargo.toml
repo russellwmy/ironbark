@@ -1,6 +1,6 @@
 [package]
 name = "ironbark-mlx"
-description = "Safe Rust API over MLX: arrays, ops, transforms, nn, optimizers"
+description = "Safe Rust API over MLX for inference on Apple silicon: arrays, ops, fused kernels, eval and compile"
 version.workspace = true
 edition = "2021"
 rust-version.workspace = true

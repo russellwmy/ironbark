@@ -47,7 +47,7 @@ ironbark/
 │   ├── ironbark-experts/   expert store: slab, loaders, LRU, pinning
 │   ├── ironbark-fetch/     fills experts.bin / embed.bin from a remote copy
 │   ├── ironbark-ffi/       C API (include/ironbark.h)
-│   ├── ironbark-cli/       `ironbark` binary: pack, verify, gen, ppl, profile
+│   ├── ironbark-cli/       `ironbark` binary: download, pack, verify, gen, ppl, profile
 │   ├── ironbark-mlx/       safe Rust API over MLX
 │   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                    IronbarkBench app (SwiftUI, xcodegen)
@@ -70,15 +70,26 @@ ironbark/
 | `ironbark-experts` | Expert memory and loading, no GPU code | `Store`, `Slab`, `Layout`, `Records` |
 | `ironbark-fetch` | A sparse `experts.bin` that fills from a server | `Sparse`, `Fetch` |
 | `ironbark-ffi` | C functions returning JSON, for Swift | `ironbark_open`, `ironbark_send`, … |
-| `ironbark-cli` | Developer tools | `ironbark pack / verify / gen / ppl / profile` |
+| `ironbark-cli` | Developer tools | `ironbark download / pack / verify / gen / ppl / profile` |
 | `ironbark-mlx` | Safe Rust API over MLX for inference | `Array`, `ops`, `transforms`, `fast` |
-| `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS | bindgen output |
+| `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS (CMake fetches MLX v0.32.2) | bindgen output; `src/docs_bindings.rs` for docs.rs |
 
 `ironbark-experts` knows nothing about MLX: it hands out pinned slots of a byte slab. `ironbark-engine` wraps that slab as one MLX array, so kernels read the slots in place.
 
 ## Model on disk
 
-`ironbark pack` turns DeepGrove's MLX checkpoint into a streaming dir. That dir is what goes on the phone.
+`ironbark download` fetches DeepGrove's MLX checkpoint from Hugging Face; `ironbark pack` turns it into a streaming dir. That dir is what goes on the phone.
+
+```
+ Hugging Face ──download──▶ ~/.ironbark/models/maple-preview-2bit-mlx ──pack──▶ ~/.ironbark/models/maple ──verify
+                            (checkpoint, ~5 GB)                                   (streaming dir, below)
+```
+
+| Step | How |
+|---|---|
+| Download | `download.rs`: the hub's file list (`/api/models/<repo>/tree/<rev>`), then one `curl` per file into `<file>.part`, renamed when its size matches; complete files are skipped, partial ones resume. No HTTP stack in the binary |
+| Models dir | `--dir`, else `$IRONBARK_MODELS`, else `~/.ironbark/models` |
+| Pack | `pack.rs`: experts to `experts.bin`, embedding to `embed.bin`, the rest to `model.safetensors`, then `manifest.json` |
 
 | File | Content |
 |---|---|
@@ -312,4 +323,5 @@ See [STYLE.md](STYLE.md) for the full style and lint rules.
 | Expert caching | `crates/ironbark-experts/src/store.rs` |
 | Memory sizing | `crates/ironbark-engine/src/plan.rs` |
 | The file format | `crates/ironbark-engine/src/pack.rs`, `crates/ironbark-experts/src/layout.rs` |
+| Getting a model | `crates/ironbark-cli/src/download.rs` |
 | Chat and tools | `crates/ironbark/src/tools.rs`, `ios/IronbarkBench/App.swift` |

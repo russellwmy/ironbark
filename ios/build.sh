@@ -30,6 +30,6 @@ if [[ ${1:-} == --install ]]; then
       --domain-identifier dev.ironbark.bench --subdirectory Documents 2>/dev/null | grep -q '/experts.json'; then
     print -u2 "warning: no pack in the app's Documents (the models are gone); copy one back:"
     print -u2 "  xcrun devicectl device copy to --device $dev --domain-type appDataContainer" \
-      "--domain-identifier dev.ironbark.bench --source ${root:A}/models/maple --destination Documents/maple"
+      "--domain-identifier dev.ironbark.bench --source ~/.ironbark/models/maple --destination Documents/maple"
   fi
 fi

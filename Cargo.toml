@@ -18,7 +18,7 @@ rust-version = "1.99"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/russellwmy/ironbark"
 readme = "README.md"
-publish = false
+publish = true
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

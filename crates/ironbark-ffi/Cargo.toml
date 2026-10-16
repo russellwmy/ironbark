@@ -9,7 +9,7 @@ repository.workspace = true
 readme.workspace = true
 keywords = ["moe", "llm", "ffi", "ios", "macos"]
 categories = ["external-ffi-bindings", "os::macos-apis"]
-publish.workspace = true
+publish = false  # a static library for apps (C API), built from the repo
 
 [lib]
 crate-type = ["staticlib", "rlib"]

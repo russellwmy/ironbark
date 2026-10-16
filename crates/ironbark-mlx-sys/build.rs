@@ -204,8 +204,20 @@ fn build_and_link_mlx_c() {
     }
 }
 
+/// Bindings kept in the repo for docs.rs, which builds with no network or Apple SDK.
+const DOCS_BINDINGS: &str = "src/docs_bindings.rs";
+
 fn main() {
     println!("cargo:rerun-if-env-changed=MLX_RS_METAL_PATH");
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // docs.rs: no MLX build (it clones MLX and compiles Metal kernels), no bindgen.
+    if env::var_os("DOCS_RS").is_some() {
+        fs_copy(DOCS_BINDINGS, &out_path.join("bindings.rs"));
+        return;
+    }
+
     build_and_link_mlx_c();
 
     let mlx_c_root = PathBuf::from("src/mlx-c");
@@ -238,6 +250,16 @@ fn main() {
         .expect("Unable to generate bindings");
 
     // Write the bindings to the $OUT_DIR/bindings.rs file.
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    bindings.write_to_file(out_path.join("bindings.rs")).expect("Couldn't write bindings!");
+    let generated = out_path.join("bindings.rs");
+    bindings.write_to_file(&generated).expect("Couldn't write bindings!");
+
+    // Keep the docs.rs copy in step with mlx-c (macOS bindings; iOS ones can differ in layout tests).
+    println!("cargo:rerun-if-changed={DOCS_BINDINGS}");
+    if !target_ios() && std::fs::read(&generated).ok() != std::fs::read(DOCS_BINDINGS).ok() {
+        println!("cargo:warning={DOCS_BINDINGS} is out of date; copy {} over it", generated.display());
+    }
+}
+
+fn fs_copy(from: &str, to: &Path) {
+    std::fs::copy(from, to).unwrap_or_else(|e| panic!("copy {from} to {}: {e}", to.display()));
 }

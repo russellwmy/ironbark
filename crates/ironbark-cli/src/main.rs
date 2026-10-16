@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
+mod download;
 mod maple;
 
 #[derive(Debug, Parser)]
@@ -73,6 +74,21 @@ impl ExpertArgs {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Download a model from Hugging Face into <dir>/<name> (resumes; complete files are skipped)
+    Download {
+        /// Hugging Face repo
+        #[arg(default_value = download::DEFAULT_REPO)]
+        repo: String,
+        /// Models dir (default: `$IRONBARK_MODELS`, else `~/.ironbark/models`)
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Subdir to write (default: the repo name without the owner)
+        #[arg(long)]
+        name: Option<String>,
+        /// Branch, tag or commit
+        #[arg(long, default_value = "main")]
+        revision: String,
+    },
     /// Write a streaming model dir: experts to <out>/experts.bin, the other weights, config and
     /// tokenizer next to it
     Pack {
@@ -137,6 +153,18 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Download {
+            repo,
+            dir,
+            name,
+            revision,
+        } => {
+            let name = name.unwrap_or_else(|| repo.rsplit('/').next().unwrap_or(&repo).to_owned());
+            let out = download::models_dir(dir)?.join(name);
+            download::download(&repo, &revision, &out)?;
+            println!("done: {}\nnext: ironbark pack --model {0} --out <packed dir>", out.display());
+            Ok(())
+        }
         Cmd::Pack { model, out, two_bit } => {
             let p = ironbark_engine::pack(&model, &out, !two_bit)?;
             println!(

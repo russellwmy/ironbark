@@ -541,6 +541,7 @@ dependencies = [
  "ironbark-experts",
  "ironbark-fetch",
  "ironbark-mlx",
+ "serde_json",
  "tokenizers",
 ]
 

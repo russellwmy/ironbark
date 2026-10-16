@@ -11,6 +11,9 @@ keywords = ["moe", "ternary", "mlx", "metal", "apple-silicon"]
 categories = ["science"]
 publish.workspace = true
 
+[package.metadata.docs.rs]
+targets = ["aarch64-apple-darwin", "aarch64-apple-ios"]
+
 [dependencies]
 ironbark-experts.workspace = true
 half.workspace = true

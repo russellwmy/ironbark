@@ -1,118 +1,143 @@
 # ironbark
 
-Ternary MoE inference on Apple Silicon. The target model is **Maple** (DeepGrove, 20B total / ~1B active, 256 experts top-8, ternary weights), run on the GPU through MLX from Rust. Goal: lowest RAM at usable speed ([DR-0001](docs/decisions/0001-ternary-moe-streaming.md)).
+Ternary MoE inference on Apple Silicon, in Rust. The target model is **Maple** (DeepGrove, 20B total / ~1B active, 256 experts top-8, ternary weights), run on the GPU through MLX. Goal: lowest RAM at usable speed ([DR-0001](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/0001-ternary-moe-streaming.md)).
+
+| Where | Setup | Decode | Peak memory |
+|---|---|---|---|
+| M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
+| M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
+| iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
+| iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
+
+Greedy decode; M1 Max checkpoint row after a short prompt, the others after a 747–887-token prompt (iPhone: prose). Conditions: [Results](#results), [Memory budget](#memory-budget).
+
+- Matches the reference: perplexity 67.8979 vs 67.8978 ([Results](#results)).
+- Sized to the device: experts that don't fit the budget are streamed from SSD ([Memory budget](#memory-budget)).
+- Ships small: an app can download ~268 MB and fetch the 4 GB of experts on demand ([On-demand experts](#on-demand-experts)).
+- Rust library, C API for iOS / macOS apps, and the `ironbark` CLI.
+
+More: [ARCHITECTURE.md](https://github.com/russellwmy/ironbark/blob/main/ARCHITECTURE.md) (design), [STYLE.md](https://github.com/russellwmy/ironbark/blob/main/STYLE.md) (code style), [docs/decisions](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/README.md) (decision records).
 
 ## Table of Contents
 
-- [Workspace](#workspace)
-- [Design](#design)
+- [Getting started](#getting-started)
 - [Commands](#commands)
+  - [Download options](#download-options)
+  - [Expert options](#expert-options)
+  - [Examples](#examples)
+  - [Development](#development)
 - [Usage](#usage)
+  - [Chat](#chat) · [Options](#options) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Experts from a server](#experts-from-a-server)
 - [Tool use](#tool-use)
 - [On-demand experts](#on-demand-experts)
+  - [On-demand embedding](#on-demand-embedding)
 - [iOS](#ios)
+  - [Memory budget](#memory-budget)
+  - [Off screen](#off-screen)
+- [Design](#design)
+- [Workspace](#workspace)
 - [Results](#results)
+  - [Checkpoint vs reference](#checkpoint-vs-reference)
+  - [Prefill](#prefill)
+  - [Streaming decode](#streaming-decode)
+  - [Readback cost](#readback-cost)
+  - [Lookahead](#lookahead)
 - [License](#license)
 
-Architecture: [ARCHITECTURE.md](ARCHITECTURE.md).
+## Getting started
 
-## Workspace
+Requirements:
 
-```
-ironbark/
-├── Cargo.toml          workspace: members, shared deps, profiles
-├── crates/
-│   ├── ironbark/           library: Session (open sized to the device, chat, tools)
-│   ├── ironbark-engine/    Maple decode on the GPU
-│   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
-│   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
-│   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
-│   ├── ironbark-cli/       binary `ironbark`: pack, verify, gen, ppl, profile
-│   ├── ironbark-mlx/       safe Rust API over MLX
-│   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
-├── ios/                IronbarkBench: SwiftUI benchmark app (xcodegen)
-├── models/             (gitignored) Maple checkpoint and packs, from scripts/setup.sh
-├── prompts/            prompt texts for perplexity and benchmarks (prose, rust)
-├── scripts/setup.sh    download Maple, build, pack, verify
-└── docs/decisions/     decision records
-```
-
-```
- ironbark-cli ─────────────────────┐
- ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-engine ──▶ ironbark-mlx (MLX 0.32, Metal)
-    ├──────────────────────────────┘         └──▶ ironbark-experts (streamed experts: slab wrapped as one MLX array, no copy)
-    └──▶ ironbark-fetch ──▶ ironbark-experts (only the Records trait, layout, hash)
-```
-
-| Crate | What |
+| Need | Notes |
 |---|---|
-| `ironbark` | Library: `Session::open` sized to the device, chat and tool turns, `parse` for tool calls |
-| `ironbark-engine` | Loads `deepgrove/maple-preview-2bit-mlx` or a packed dir; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
-| `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
-| `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
-| `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
-| `ironbark-cli` | `ironbark pack` (experts -> `experts.bin`), `verify`, `gen` (greedy decode, speed, memory), `ppl` (perplexity), `profile`; `--experts DIR` streams experts (`--cache N`, `--budget GB`, `--loaders`, `--lookahead`) |
-| `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
-| `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.2 and its Metal kernels for macOS and iOS |
+| Apple Silicon Mac | The GPU path (MLX, Metal) only runs on M-series chips |
+| Xcode + Metal toolchain | Compiles MLX's Metal kernels; Xcode 26: `xcodebuild -downloadComponent MetalToolchain` |
+| Rust via `rustup` | `rust-toolchain.toml` pins 1.99.0; `rustup` installs it on the first `cargo` call |
+| CMake | Builds MLX: `brew install cmake` |
+| Disk | ~5 GB checkpoint + 4.0 GB pack (`~/.ironbark/models`) + ~10 GB `target/` |
 
-## Design
-
-One token per step; the residual stream is carried as (h, hn) so every add + norm is one kernel:
+Steps:
 
 ```
- token ──▶ embed (4-bit) ──▶ 24 × [ RMSNorm ─▶ QKV (ternary) ─▶ QK norm, RoPE (sliding layers only)
-                                    ─▶ attention (window 512 on 18 sliding layers, full on 6) ─▶ O (ternary)
-                                    RMSNorm ─▶ router (fp32, top-8 of 256)
-                                    ─▶ 8 experts: up+gate (ternary) ─▶ clamped SwiGLU ─▶ down (ternary) ]
-       ──▶ RMSNorm ──▶ LM head (4-bit) ──▶ logits
+ cargo build ──▶ download ──▶ pack ──▶ verify ──▶ gen
+  (~15 min,      (~5 GB,     (4.0 GB    (hashes,   (first
+   MLX once)      resumes)    pack)      records)   tokens)
 ```
 
-| Part | Choice | Why |
-|---|---|---|
-| Ternary weights | Packed 2-bit codes + one scale α per row, read by custom kernels: matvec (QKV, O, gathered down) and fused up+gate+clamped SwiGLU | MLX's affine layout repeats (α, −α) per 128-weight group: 0.54 GB more memory and more bytes per token |
-| Embedding, LM head | 4-bit affine, stock MLX | Not ternary |
-| Embedding in RAM | Packed models keep it in `embed.bin`, memory-mapped and wrapped as MLX arrays without a copy (`embed.rs`) | One 1 KiB row is read per token; the 175 MB table is clean file-backed memory, not app footprint: 0.19 GB lower peak, same speed |
-| Fused kernels | add + RMSNorm; expert weighted sum + add + next RMSNorm; per-head QK norm + RoPE; router GEMV + softmax + top-8 | ~300 → ~13 GPU launches per layer; their reductions follow MLX 0.32, so results stay bit-exact (unit tests compare each against the unfused ops) |
-| KV cache | Preallocated, written in place: full layers grow by 256 slots, sliding layers are a 512-slot ring | Same layout as mlx-lm, so attention sums in the same order (a time-ordered window drifted 0.7% in perplexity past 512 tokens) |
-| Numerics | bf16 activations; RMSNorm and router in fp32; clamp in bf16 | Bit-exact with the reference (an f32 clamp constant promoted the experts to f32 and moved perplexity 8%) |
-| Loading | Each layer is evaluated as it is built | Frees the checkpoint's split tensors early: peak memory = steady-state memory |
-| Decode loop | Step t+1 is built from the lazy argmax of step t, then `async_eval` | The GPU never waits for the CPU to read a token |
-
-Streaming experts (`--experts`): per layer, the router's choice is read back on the CPU, the 8 experts are pinned in the store (loaded from `experts.bin` on a miss), and the slab kernels read their slots directly; the slab is wrapped as one MLX array without copying (Metal `bytesNoCopy`). With `--lookahead N` (default 1), the same readback also carries the next N layers' predicted experts (their router on the current residual), which loaders fetch while the GPU works.
-
+```bash
+git clone https://github.com/russellwmy/ironbark && cd ironbark
+cargo build --release                                 # first build compiles MLX, about 15 min
+B=target/release/ironbark
+$B download                                           # -> ~/.ironbark/models/maple-preview-2bit-mlx
+$B pack --model ~/.ironbark/models/maple-preview-2bit-mlx --out ~/.ironbark/models/maple
+$B verify ~/.ironbark/models/maple
+$B gen --model ~/.ironbark/models/maple --experts ~/.ironbark/models/maple --prompt "The capital of Germany is"
 ```
- router (GPU) ──ids──▶ CPU: Store.request / wait (hit, or pread into a free slot)
-                          │ slot numbers (pinned until the next layer's readback)
-                          ▼
- up+gate+SwiGLU, down kernels read slab[slot]
-```
+
+Models go to `~/.ironbark/models` unless you pass `--dir` or set `IRONBARK_MODELS`. Set `HF_TOKEN` for private repos. All commands and options: [Commands](#commands); the library: [Usage](#usage); the phone: [iOS](#ios).
 
 ## Commands
 
-One step from a fresh clone (needs `cargo` and `hf`: `brew install huggingface-cli`):
+Requirements and the short path: [Getting started](#getting-started). Every command has `--help`.
 
-```bash
-scripts/setup.sh              # download to models/maple-2bit-mlx, build, pack to models/maple, verify
-scripts/setup.sh --two-bit    # also the 2-bit pack in models/maple-2bit
+| Command | What |
+|---|---|
+| `ironbark download [REPO]` | Download a model from Hugging Face into `~/.ironbark/models` |
+| `ironbark pack --model M --out P` | Turn an MLX checkpoint into a streaming model dir (`experts.bin`, `embed.bin`, other weights, tokenizer, manifest); `--two-bit` for 2-bit expert records |
+| `ironbark verify P` | Check a packed model against its manifest: sizes, file hashes, every expert record |
+| `ironbark gen --model M --prompt "…"` | Greedy decode, with prefill / decode speed and GPU memory; `--gen N` tokens (default 128), `--top N` prints top-5 logits |
+| `ironbark ppl --model M --text FILE` | Perplexity: first half of `--tokens` (default 512) is context, second half is scored; `--batch` for one batched forward |
+| `ironbark profile --model M` | GPU time of each part of a decode step |
+
+```
+ download ──▶ M: MLX checkpoint ──▶ pack ──▶ P: packed model ──▶ verify ──▶ gen / ppl / profile, library, phone
 ```
 
-Or step by step:
+### Download options
+
+| Option | Default |
+|---|---|
+| `REPO` | `deepgrove/maple-preview-2bit-mlx` |
+| `--dir` | `$IRONBARK_MODELS`, else `~/.ironbark/models` |
+| `--name` | Repo name without the owner |
+| `--revision` | `main` |
+
+Reruns resume partial files and skip complete ones. Set `HF_TOKEN` for private repos.
+
+### Expert options
+
+For `gen`, `ppl` and `profile`:
+
+| Option | Default | What |
+|---|---|---|
+| `--experts DIR` | Off: all experts in RAM | Stream experts from a packed dir |
+| `--budget GB` | 3/8 of RAM | Footprint budget |
+| `--cache N` | What fits the budget | Expert cache slots per layer (of 256) |
+| `--loaders N` | 8 | Threads reading experts |
+| `--lookahead N` | 1 | Layers ahead to predict and prefetch (0 = off) |
+| `--fetch-from DIR` | Off | Fill `--experts`' `experts.bin` and `embed.bin` on demand from this complete pack (stands in for a server) |
+| `--fetch-ms MS` | 30 | Delay per fetch, standing in for a network round trip |
+| `--fill N` / `--embed-fill N` | 4 / as `--fill` | Background fill threads (0: fetch only what the model needs) |
+
+### Examples
 
 ```bash
-cargo build --release
-M=$PWD/models/maple-2bit-mlx      # hf download deepgrove/maple-preview-2bit-mlx --local-dir $M
-target/release/ironbark gen --model $M --prompt "The capital of Germany is" --gen 128
-target/release/ironbark ppl --model $M --text prompts/prose.txt --tokens 400
-P=$PWD/models/maple                # a packed model: what the library and the phone use
-target/release/ironbark pack --model $M --out $P           # trit experts (4.0 GB) + other weights, tokenizer, manifest
-target/release/ironbark verify $P                          # sizes, hashes, every expert record (e.g. after copying)
-target/release/ironbark gen --model $P --prompt "..." --experts $P           # sized to this machine
-target/release/ironbark gen --model $P --prompt "..." --experts $P --budget 2  # or to a 2 GB footprint
+B=target/release/ironbark
+M=~/.ironbark/models/maple-preview-2bit-mlx   # from: $B download
+P=~/.ironbark/models/maple                    # a packed model: what the library and the phone use
+$B gen --model $M --prompt "The capital of Germany is" --gen 128
+$B ppl --model $M --text prompts/prose.txt --tokens 400
+$B pack --model $M --out $P                   # trit experts (4.0 GB) + other weights, tokenizer, manifest
+$B verify $P                                  # e.g. after copying
+$B gen --model $P --prompt "..." --experts $P             # sized to this machine
+$B gen --model $P --prompt "..." --experts $P --budget 2  # or to a 2 GB footprint
 ```
 
 To use the library from your own code, see [Usage](#usage).
 
-Checks (toolchain pinned in `rust-toolchain.toml`; `rustfmt.toml`, `clippy.toml`, `deny.toml`):
+### Development
+
+Toolchain pinned in `rust-toolchain.toml`; config in `rustfmt.toml`, `clippy.toml`, `deny.toml`; rules in [STYLE.md](https://github.com/russellwmy/ironbark/blob/main/STYLE.md).
 
 ```bash
 cargo fmt --all --check
@@ -121,17 +146,17 @@ IRONBARK_MODEL=$P cargo test --workspace --release -- --test-threads=1   # witho
 cargo deny check
 ```
 
-The first build compiles MLX from source (about 15 min).
-
 ## Usage
 
-The crates are not on crates.io (`publish = false`), so depend on them by path or git. They need Rust 1.99+. iOS needs nothing extra: `ironbark-mlx-sys` builds MLX's kernels for iOS.
+Needs Rust 1.99+, macOS or iOS on Apple Silicon, Xcode and CMake ([Getting started](#getting-started)). The first build downloads MLX v0.32.2 from GitHub and compiles it with its Metal kernels (about 15 min); iOS needs nothing extra.
 
 ```toml
 [dependencies]
-ironbark = { path = "../ironbark/crates/ironbark" }
-ironbark-fetch = { path = "../ironbark/crates/ironbark-fetch" }   # only for on-demand experts
+ironbark = "0.1"
+ironbark-fetch = "0.1"   # only for on-demand experts
 ```
+
+Install the CLI: `cargo install ironbark-cli` (binary `ironbark`). The C API (`ironbark-ffi`) is not on crates.io; build it from this repo.
 
 ```
  Session::open(dir, Options) ──▶ set_system(date, tools) ──▶ chat(msg) ──▶ Reply (iterator of text pieces)
@@ -331,7 +356,7 @@ Output is the same as the local pack in every run. The first query's time goes t
 
 | Step | Command |
 |---|---|
-| Pack | `ironbark pack --model $M --out $P` (trit); add `--two-bit --out models/maple-2bit` for the 2-bit pack |
+| Pack | `ironbark pack --model $M --out $P` (trit); add `--two-bit --out ~/.ironbark/models/maple-2bit` for the 2-bit pack |
 | Build app | `IRONBARK_TEAM=<Apple Team ID> ios/build.sh` (Rust for `aarch64-apple-ios`, iOS metallib, xcodegen, xcodebuild); `--install` installs on the connected iPhone and warns if the app's models are gone (an install can come with an empty data folder) |
 | Copy model | `xcrun devicectl device copy to --device $DEV --domain-type appDataContainer --domain-identifier dev.ironbark.bench --source $P --destination Documents/maple`; the 2-bit pack goes to `Documents/maple-2bit` |
 | Benchmark | Put the arguments in `auto.txt` (e.g. `-models maple,maple-2bit -budgets 0,2,1.5`), copy it like the model to `Documents/auto.txt`, then `xcrun devicectl device process launch --terminate-existing --device $DEV dev.ironbark.bench`; results go to `Documents/results.jsonl` (new each run). Don't pass `-auto` on the launch line: Xcode 26's `devicectl` reads it as its own options |
@@ -358,7 +383,9 @@ The model is sized to the device (`plan.rs`, `device.rs`). Budget = 3/8 of RAM, 
 | 16 GB Mac | 6 GB | 256 (trit) | all loaded once |
 | 32+ GB Mac | 12+ GB | 256 | all loaded once, no streaming: 2-bit packs as resident tensors (as from the checkpoint), trit packs in the slab with the router's choice mapped to slots on the GPU; no readback either way |
 
-Measured on M1 Max, 2026-10-16 (Rust prompt, 887 tokens, 128 decoded, one run per row; footprint = what iOS counts; packs on the internal SSD: from a disk image the load wait was ~2x and streamed decode up to 2x slower). In brackets: before `embed.bin` (embedding loaded into memory).
+#### Measured on the Mac
+
+M1 Max, 2026-10-16 (Rust prompt, 887 tokens, 128 decoded, one run per row; footprint = what iOS counts; packs on the internal SSD: from a disk image the load wait was ~2x and streamed decode up to 2x slower). In brackets: before `embed.bin` (embedding loaded into memory).
 
 Trit records (`ironbark pack` default):
 
@@ -382,6 +409,8 @@ Trit records (`ironbark pack` default):
 | device (24 GiB = 25.8 GB) | 256 | all | – | 5.76 GB (5.93) | 1,095 tok/s (1,081) | 197.7 tok/s (198.6) |
 
 All 256 loaded from the packed dir is exact (perplexity 67.8979 / batched 72.7078).
+
+#### Measured on iPhone 17
 
 iPhone 17 (A19, 8 GB RAM, app limit 6.44 GB with the increased-memory-limit entitlement), embedding mapped from `embed.bin`, measured 2026-10-16: 747-token prose and 887-token Rust prompts, 128 decoded, one run per row (device budget: 3 runs). Peak = footprint as iOS counts it, sampled every 1 ms. In brackets: before `embed.bin` (embedding loaded into memory, 2026-10-15).
 
@@ -421,7 +450,80 @@ iOS runs no GPU work for an app off screen. When IronbarkBench leaves the screen
 
 Without a debugger connection (`devicectl` needs the developer disk image), install with `ios-deploy --bundle`, upload the arguments as `Documents/auto.txt` (`ios-deploy --upload auto.txt --to Documents/auto.txt`), open the app, and download `Documents/results.jsonl`.
 
+## Design
+
+One token per step; the residual stream is carried as (h, hn) so every add + norm is one kernel:
+
+```
+ token ──▶ embed (4-bit) ──▶ 24 × [ RMSNorm ─▶ QKV (ternary) ─▶ QK norm, RoPE (sliding layers only)
+                                    ─▶ attention (window 512 on 18 sliding layers, full on 6) ─▶ O (ternary)
+                                    RMSNorm ─▶ router (fp32, top-8 of 256)
+                                    ─▶ 8 experts: up+gate (ternary) ─▶ clamped SwiGLU ─▶ down (ternary) ]
+       ──▶ RMSNorm ──▶ LM head (4-bit) ──▶ logits
+```
+
+| Part | Choice | Why |
+|---|---|---|
+| Ternary weights | Packed 2-bit codes + one scale α per row, read by custom kernels: matvec (QKV, O, gathered down) and fused up+gate+clamped SwiGLU | MLX's affine layout repeats (α, −α) per 128-weight group: 0.54 GB more memory and more bytes per token |
+| Embedding, LM head | 4-bit affine, stock MLX | Not ternary |
+| Embedding in RAM | Packed models keep it in `embed.bin`, memory-mapped and wrapped as MLX arrays without a copy (`embed.rs`) | One 1 KiB row is read per token; the 175 MB table is clean file-backed memory, not app footprint: 0.19 GB lower peak, same speed |
+| Fused kernels | add + RMSNorm; expert weighted sum + add + next RMSNorm; per-head QK norm + RoPE; router GEMV + softmax + top-8 | ~300 → ~13 GPU launches per layer; their reductions follow MLX 0.32, so results stay bit-exact (unit tests compare each against the unfused ops) |
+| KV cache | Preallocated, written in place: full layers grow by 256 slots, sliding layers are a 512-slot ring | Same layout as mlx-lm, so attention sums in the same order (a time-ordered window drifted 0.7% in perplexity past 512 tokens) |
+| Numerics | bf16 activations; RMSNorm and router in fp32; clamp in bf16 | Bit-exact with the reference (an f32 clamp constant promoted the experts to f32 and moved perplexity 8%) |
+| Loading | Each layer is evaluated as it is built | Frees the checkpoint's split tensors early: peak memory = steady-state memory |
+| Decode loop | Step t+1 is built from the lazy argmax of step t, then `async_eval` | The GPU never waits for the CPU to read a token |
+
+Streaming experts (`--experts`): per layer, the router's choice is read back on the CPU, the 8 experts are pinned in the store (loaded from `experts.bin` on a miss), and the slab kernels read their slots directly; the slab is wrapped as one MLX array without copying (Metal `bytesNoCopy`). With `--lookahead N` (default 1), the same readback also carries the next N layers' predicted experts (their router on the current residual), which loaders fetch while the GPU works.
+
+```
+ router (GPU) ──ids──▶ CPU: Store.request / wait (hit, or pread into a free slot)
+                          │ slot numbers (pinned until the next layer's readback)
+                          ▼
+ up+gate+SwiGLU, down kernels read slab[slot]
+```
+
+## Workspace
+
+```
+ironbark/
+├── Cargo.toml          workspace: members, shared deps, profiles
+├── ARCHITECTURE.md     design
+├── STYLE.md            code style and checks
+├── crates/
+│   ├── ironbark/           library: Session (open sized to the device, chat, tools)
+│   ├── ironbark-engine/    Maple decode on the GPU
+│   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
+│   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
+│   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
+│   ├── ironbark-cli/       binary `ironbark`: download, pack, verify, gen, ppl, profile
+│   ├── ironbark-mlx/       safe Rust API over MLX
+│   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
+├── ios/                IronbarkBench: SwiftUI benchmark app (xcodegen)
+├── prompts/            prompt texts for perplexity and benchmarks (prose, rust)
+└── docs/decisions/     decision records
+```
+
+```
+ ironbark-cli ─────────────────────┐
+ ironbark-ffi ──▶ ironbark (lib) ──┼▶ ironbark-engine ──▶ ironbark-mlx (MLX 0.32, Metal)
+    ├──────────────────────────────┘         └──▶ ironbark-experts (streamed experts: slab wrapped as one MLX array, no copy)
+    └──▶ ironbark-fetch ──▶ ironbark-experts (only the Records trait, layout, hash)
+```
+
+| Crate | What |
+|---|---|
+| `ironbark` | Library: `Session::open` sized to the device, chat and tool turns, `parse` for tool calls |
+| `ironbark-engine` | Loads `deepgrove/maple-preview-2bit-mlx` or a packed dir; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
+| `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
+| `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
+| `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
+| `ironbark-cli` | The `ironbark` binary: `download`, `pack`, `verify`, `gen`, `ppl`, `profile` (see [Commands](#commands)) |
+| `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
+| `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.2 and its Metal kernels for macOS and iOS |
+
 ## Results
+
+### Checkpoint vs reference
 
 M1 Max (64 GB), measured 2026-10-15. Prompts are the first 3,000 characters of `prompts/prose.txt` and `rust.txt` (746 and 887 tokens); the long prompt is 10,000 characters of prose (2,327 tokens). Decode = greedy tokens/s after a short prompt (256 tokens) and after the prose prompt (128 tokens). DeepGrove's numbers are from mlx-lm `stream_generate` with a 512-token prompt.
 
@@ -430,6 +532,8 @@ M1 Max (64 GB), measured 2026-10-15. Prompts are the first 3,000 characters of `
 | DeepGrove `maple.py` (mlx-lm, fused Metal kernels) | – | 217 tok/s | 6.81 GB | 67.8978 / 31.2153 |
 | DeepGrove + FlashHead (approximate head) | – | 233 tok/s | 7.30 GB | – |
 | ironbark (checkpoint) | **232 tok/s** | 205 tok/s | **5.55 GB** | 67.8979 / 31.2154 |
+
+### Prefill
 
 Prefill runs in chunks of up to 512 tokens (`prefill.rs`: MLX `quantized_matmul` / `gather_qmm` with row scales expanded per layer, experts sorted by id, causal or 512-window masks): 1,143 tok/s on the prose prompt and 1,180 tok/s on the long one (reference ~1,200). Its perplexity matches the reference's batched path exactly (72.7078 / 30.0218 at 400 / 1024 tokens vs 72.7077 / 30.0218). Maple's batched and token-by-token arithmetic differ by ±5% in perplexity in the reference too.
 
@@ -451,7 +555,9 @@ Streamed prefill (trit pack, lookahead 1):
 | 64 | 305 tok/s | 330 tok/s | 1.72 GB |
 | 32 | 285 tok/s | 306 tok/s | 1.18 GB |
 
-Streaming decode (trit pack, M1 Max internal SSD, 256 decoded tokens, lookahead 1, one run each; perplexity unchanged at 67.8979):
+### Streaming decode
+
+Trit pack, M1 Max internal SSD, 256 decoded tokens, lookahead 1, one run each; perplexity unchanged at 67.8979:
 
 | Cache per layer | Peak GPU memory | Prose: hit / read / decode | Rust: hit / read / decode |
 |---|---|---|---|
@@ -462,6 +568,8 @@ Streaming decode (trit pack, M1 Max internal SSD, 256 decoded tokens, lookahead 
 | 16 | 0.89 GB | 72.5% / 106.1 MB/tok / 23 tok/s | 64.3% / 128.0 MB/tok / 21 tok/s |
 
 The per-layer readback (24 GPU→CPU round trips per token) costs more than the SSD: at 128 per layer, prose waits 2.5 ms per token for loads but decodes at 68 tok/s, against ~172 when every expert fits and no readback is needed. A bare MLX round trip (one tiny op, eval, read) takes ~225 µs on this Mac, so that cost is MLX/Metal latency, not ironbark.
+
+### Readback cost
 
 Skipping readbacks while staying exact would mean running a layer on the GPU's own slot map and redoing it when one of its 8 experts was not cached. How often a layer has all 8 cached (Mac, 128 decoded tokens):
 
@@ -485,7 +593,9 @@ The round trip itself is Metal's, not MLX's. Raw Metal on the M1 Max (one 1-thre
 
 Spinning in MLX's `EventImpl::wait` (a test patch) left MLX's round trip at 206 µs and slowed streamed decode (prose 48–62 → 45 tok/s at 119 per layer, the spinning core competing with the expert loaders), so it was dropped. Each readback needs the GPU to resume after a CPU decision, which costs ~200 µs of scheduling on Apple GPUs however it is expressed; only fewer CPU decisions per token cut it.
 
-Lookahead prefetch (same prompts, decode tok/s):
+### Lookahead
+
+Lookahead prefetch (same prompts as [Streaming decode](#streaming-decode), decode tok/s):
 
 | Lookahead | Prose 128 | Prose 64 | Prose 32 | Rust 128 | Rust 64 | Rust 32 |
 |---|---|---|---|---|---|---|
@@ -499,6 +609,6 @@ It raises the effective hit rate (prose at 64: 74.7% → 89.4%) at the cost of m
 
 | What | License |
 |---|---|
-| ironbark code | MIT OR Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)) |
-| `crates/ironbark-mlx*` | MIT OR Apache-2.0; based on mlx-rs 0.32 by the mlx-rs authors ([DR-0002](docs/decisions/0002-own-mlx-bindings.md)) |
+| ironbark code | MIT OR Apache-2.0, at your option ([LICENSE-MIT](https://github.com/russellwmy/ironbark/blob/main/LICENSE-MIT), [LICENSE-APACHE](https://github.com/russellwmy/ironbark/blob/main/LICENSE-APACHE)) |
+| `crates/ironbark-mlx*` | MIT OR Apache-2.0; based on mlx-rs 0.32 by the mlx-rs authors ([DR-0002](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/0002-own-mlx-bindings.md)) |
 | Maple weights (not in this repo) | MIT, DeepGrove; `ironbark pack` copies its `LICENSE` into every pack |
