@@ -1,0 +1,7 @@
+# Pinned so every machine (and CI) builds with the same compiler, lints and formatter.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+# Apple Silicon macOS, iPhone, and the iOS simulator (which MLX cannot link yet).
+targets = ["aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim"]

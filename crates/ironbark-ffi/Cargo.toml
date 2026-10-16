@@ -1,0 +1,21 @@
+[package]
+name = "ironbark-ffi"
+description = "C API for running Maple from an iOS or macOS app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+ironbark.workspace = true
+ironbark-fetch.workspace = true
+ironbark-mlx.workspace = true
+mlx-rs.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

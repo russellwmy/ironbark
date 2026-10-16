@@ -1,0 +1,3592 @@
+//! Use assembly fma if the `fma` or `fma4` feature is detected at runtime.
+
+use core::arch::asm;
+
+use super::super::super::generic;
+use super::detect::{cpu_flags, get_cpu_features};
+use crate::support::Round;
+use crate::support::feature_detect::select_once;
+
+pub fn fma(x: f64, y: f64, z: f64) -> f64 {
+    select_once! {
+        sig: fn(x: f64, y: f64, z: f64) -> f64,
+        init: || {
+            let features = get_cpu_features();
+            if features.contains(cpu_flags::FMA) {
+                fma_with_fma
+            } else if features.contains(cpu_flags::FMA4) {
+               fma_with_fma4
+            } else {
+                fma_fallback as Func
+            }
+        },
+        // SAFETY: `fn_ptr` is the result of `init`, preconditions have been checked.
+        call: |fn_ptr: Func| unsafe { fn_ptr(x, y, z) },
+    }
+}
+
+pub fn fmaf(x: f32, y: f32, z: f32) -> f32 {
+    select_once! {
+        sig: fn(x: f32, y: f32, z: f32) -> f32,
+        init: || {
+            let features = get_cpu_features();
+            if features.contains(cpu_flags::FMA) {
+                fmaf_with_fma
+            } else if features.contains(cpu_flags::FMA4) {
+                fmaf_with_fma4
+            } else {
+                fmaf_fallback as Func
+            }
+        },
+        // SAFETY: `fn_ptr` is the result of `init`, preconditions have been checked.
+        call: |fn_ptr: Func| unsafe { fn_ptr(x, y, z) },
+    }
+}
+
+/// # Safety
+///
+/// Must have +fma available.
+unsafe fn fma_with_fma(mut x: f64, y: f64, z: f64) -> f64 {
+    debug_assert!(get_cpu_features().contains(cpu_flags::FMA));
+
+    // SAFETY: fma is asserted available by precondition, which provides the instruction. No
+    // memory access or side effects.
+    unsafe {
+        asm!(
+            "vfmadd213sd {x}, {y}, {z}",
+            x = inout(xmm_reg) x,
+            y = in(xmm_reg) y,
+            z = in(xmm_reg) z,
+            options(nostack, nomem, pure),
+        );
+    }
+    x
+}
+
+/// # Safety
+///
+/// Must have +fma available.
+unsafe fn fmaf_with_fma(mut x: f32, y: f32, z: f32) -> f32 {
+    debug_assert!(get_cpu_features().contains(cpu_flags::FMA));
+
+    // SAFETY: fma is asserted available by precondition, which provides the instruction. No
+    // memory access or side effects.
+    unsafe {
+        asm!(
+            "vfmadd213ss {x}, {y}, {z}",
+            x = inout(xmm_reg) x,
+            y = in(xmm_reg) y,
+            z = in(xmm_reg) z,
+            options(nostack, nomem, pure),
+        );
+    }
+    x
+}
+
+/// # Safety
+///
+/// Must have +fma4 available.
+unsafe fn fma_with_fma4(mut x: f64, y: f64, z: f64) -> f64 {
+    debug_assert!(get_cpu_features().contains(cpu_flags::FMA4));
+
+    // SAFETY: fma4 is asserted available by precondition, which provides the instruction. No
+    // memory access or side effects.
+    unsafe {
+        asm!(
+            "vfmaddsd {x}, {x}, {y}, {z}",
+            x = inout(xmm_reg) x,
+            y = in(xmm_reg) y,
+            z = in(xmm_reg) z,
+            options(nostack, nomem, pure),
+        );
+    }
+    x
+}
+
+/// # Safety
+///
+/// Must have +fma4 available.
+unsafe fn fmaf_with_fma4(mut x: f32, y: f32, z: f32) -> f32 {
+    debug_assert!(get_cpu_features().contains(cpu_flags::FMA4));
+
+    // SAFETY: fma4 is asserted available by precondition, which provides the instruction. No
+    // memory access or side effects.
+    unsafe {
+        asm!(
+            "vfmaddss {x}, {x}, {y}, {z}",
+            x = inout(xmm_reg) x,
+            y = in(xmm_reg) y,
+            z = in(xmm_reg) z,
+            options(nostack, nomem, pure),
+        );
+    }
+    x
+}
+
+// FIXME: the `select_implementation` macro should handle arch implementations that want
+// to use the fallback, so we don't need to recreate the body.
+
+fn fma_fallback(x: f64, y: f64, z: f64) -> f64 {
+    generic::fma_round(x, y, z, Round::Nearest).val
+}
+
+fn fmaf_fallback(x: f32, y: f32, z: f32) -> f32 {
+    generic::fma_wide_round(x, y, z, Round::Nearest).val
+}
+
+
+#![allow(unused_variables)] // "unused" f16 registers
+#![cfg_attr(f128_enabled, feature(f128))]
+#![cfg_attr(f16_enabled, feature(f16))]
+
+use builtins_test::float_bench;
+use compiler_builtins::float::extend;
+use criterion::{Criterion, criterion_main};
+
+#[cfg(f16_enabled)]
+float_bench! {
+    name: extend_f16_f32,
+    sig: (a: f16) -> f32,
+    crate_fn: extend::__extendhfsf2,
+    sys_fn: __extendhfsf2,
+    sys_available: not(no_sys_f16),
+    asm: [
+        #[cfg(target_arch = "aarch64")] {
+            let ret: f32;
+            asm!(
+                "fcvt    {ret:s}, {a:h}",
+                a = in(vreg) a,
+                ret = lateout(vreg) ret,
+                options(nomem, nostack, pure),
+            );
+
+            ret
+        };
+    ],
+}
+
+#[cfg(f16_enabled)]
+float_bench! {
+    name: extend_f16_f64,
+    sig: (a: f16) -> f64,
+    crate_fn: extend::__extendhfdf2,
+    sys_fn: __extendhfdf2,
+    sys_available: not(no_sys_f16_f64_convert),
+    asm: [
+        #[cfg(target_arch = "aarch64")] {
+            let ret: f64;
+            asm!(
+                "fcvt    {ret:d}, {a:h}",
+                a = in(vreg) a,
+                ret = lateout(vreg) ret,
+                options(nomem, nostack, pure),
+            );
+
+            ret
+        };
+    ],
+}
+
+#[cfg(all(f16_enabled, f128_enabled))]
+float_bench! {
+    name: extend_f16_f128,
+    sig: (a: f16) -> f128,
+    crate_fn: extend::__extendhftf2,
+    crate_fn_ppc: extend::__extendhfkf2,
+    sys_fn: __extendhftf2,
+    sys_fn_ppc: __extendhfkf2,
+    sys_available: not(no_sys_f16_f128_convert),
+    asm: [],
+}
+
+float_bench! {
+    name: extend_f32_f64,
+    sig: (a: f32) -> f64,
+    crate_fn: extend::__extendsfdf2,
+    sys_fn: __extendsfdf2,
+    sys_available: all(),
+    asm: [
+        #[cfg(target_arch = "aarch64")] {
+            let ret: f64;
+            asm!(
+                "fcvt    {ret:d}, {a:s}",
+                a = in(vreg) a,
+                ret = lateout(vreg) ret,
+                options(nomem, nostack, pure),
+            );
+
+            ret
+        };
+    ],
+}
+
+#[cfg(f128_enabled)]
+float_bench! {
+    name: extend_f32_f128,
+    sig: (a: f32) -> f128,
+    crate_fn: extend::__extendsftf2,
+    crate_fn_ppc: extend::__extendsfkf2,
+    sys_fn: __extendsftf2,
+    sys_fn_ppc: __extendsfkf2,
+    sys_available: not(no_sys_f128),
+    asm: [],
+}
+
+#[cfg(f128_enabled)]
+float_bench! {
+    name: extend_f64_f128,
+    sig: (a: f64) -> f128,
+    crate_fn: extend::__extenddftf2,
+    crate_fn_ppc: extend::__extenddfkf2,
+    sys_fn: __extenddftf2,
+    sys_fn_ppc: __extenddfkf2,
+    sys_available: not(no_sys_f128),
+    asm: [],
+}
+
+pub fn float_extend() {
+    let mut criterion = Criterion::default().configure_from_args();
+
+    #[cfg(f16_enabled)]
+    {
+        extend_f16_f32(&mut criterion);
+        extend_f16_f64(&mut criterion);
+
+        #[cfg(f128_enabled)]
+        extend_f16_f128(&mut criterion);
+    }
+
+    extend_f32_f64(&mut criterion);
+
+    #[cfg(f128_enabled)]
+    {
+        extend_f32_f128(&mut criterion);
+        extend_f64_f128(&mut criterion);
+    }
+}
+
+criterion_main!(float_extend);
+
+
+//! Floating point division routines.
+//!
+//! This module documentation gives an overview of the method used. More documentation is inline.
+//!
+//! # Relevant notation
+//!
+//! - `m_a`: the mantissa of `a`, in base 2
+//! - `p_a`: the exponent of `a`, in base 2. I.e. `a = m_a * 2^p_a`
+//! - `uqN` (e.g. `uq1`): this refers to Q notation for fixed-point numbers. UQ1.31 is an unsigned
+//!   fixed-point number with 1 integral bit, and 31 decimal bits. A `uqN` variable of type `uM`
+//!   will have N bits of integer and M-N bits of fraction.
+//! - `hw`: half width, i.e. for `f64` this will be a `u32`.
+//! - `x` is the best estimate of `1/m_b`
+//!
+//! # Method Overview
+//!
+//! Division routines must solve for `a / b`, which is `res = m_a*2^p_a / m_b*2^p_b`. The basic
+//! process is as follows:
+//!
+//! - Rearange the exponent and significand to simplify the operations:
+//!   `res = (m_a / m_b) * 2^{p_a - p_b}`.
+//! - Check for early exits (infinity, zero, etc).
+//! - If `a` or `b` are subnormal, normalize by shifting the mantissa and adjusting the exponent.
+//! - Set the implicit bit so math is correct.
+//! - Shift mantissa significant digits (with implicit bit) fully left such that fixed-point UQ1
+//!   or UQ0 numbers can be used for mantissa math. These will have greater precision than the
+//!   actual mantissa, which is important for correct rounding.
+//! - Calculate the reciprocal of `m_b`, `x`.
+//! - Use the reciprocal to multiply rather than divide: `res = m_a * x_b * 2^{p_a - p_b}`.
+//! - Reapply rounding.
+//!
+//! # Reciprocal calculation
+//!
+//! Calculating the reciprocal is the most complicated part of this process. It uses the
+//! [Newton-Raphson method], which picks an initial estimation (of the reciprocal) and performs
+//! a number of iterations to increase its precision.
+//!
+//! In general, Newton's method takes the following form:
+//!
+//! ```text
+//! `x_n` is a guess or the result of a previous iteration. Increasing `n` converges to the
+//! desired result.
+//!
+//! The result approaches a zero of `f(x)` by applying a correction to the previous gues.
+//!
+//! x_{n+1} = x_n - f(x_n) / f'(x_n)
+//! ```
+//!
+//! Applying this to find the reciprocal:
+//!
+//! ```text
+//! 1 / x = b
+//!
+//! Rearrange so we can solve by finding a zero
+//! 0 = (1 / x) - b = f(x)
+//!
+//! f'(x) = -x^{-2}
+//!
+//! x_{n+1} = 2*x_n - b*x_n^2
+//! ```
+//!
+//! This is a process that can be repeated to calculate the reciprocal with enough precision to
+//! achieve a correctly rounded result for the overall division operation. The maximum required
+//! number of iterations is known since precision doubles with each iteration.
+//!
+//! # Half-width operations
+//!
+//! Calculating the reciprocal requires widening multiplication and performing arithmetic on the
+//! results, meaning that emulated integer arithmetic on `u128` (for `f64`) and `u256` (for `f128`)
+//! gets used instead of native math.
+//!
+//! To make this more efficient, all but the final operation can be computed using half-width
+//! integers. For example, rather than computing four iterations using 128-bit integers for `f64`,
+//! we can instead perform three iterations using native 64-bit integers and only one final
+//! iteration using the full 128 bits.
+//!
+//! This works because of precision doubling. Some leeway is allowed here because the fixed-point
+//! number has more bits than the final mantissa will.
+//!
+//! [Newton-Raphson method]: https://en.wikipedia.org/wiki/Newton%27s_method
+
+use core::mem::size_of;
+use core::ops;
+
+use crate::support::{CastFrom, CastInto, DInt, Float, HInt, HalfRep, Int, MinInt};
+
+fn div<F: Float>(a: F, b: F) -> F
+where
+    F::Int: CastInto<i32>,
+    F::Int: From<HalfRep<F>>,
+    F::Int: From<u8>,
+    F::Int: HInt + DInt,
+    <F::Int as HInt>::D: ops::Shr<u32, Output = <F::Int as HInt>::D>,
+    F::Int: From<u32>,
+    u16: CastInto<F::Int>,
+    i32: CastInto<F::Int>,
+    u32: CastInto<F::Int>,
+    u128: CastInto<HalfRep<F>>,
+{
+    let one = F::Int::ONE;
+    let zero = F::Int::ZERO;
+    let one_hw = HalfRep::<F>::ONE;
+    let zero_hw = HalfRep::<F>::ZERO;
+    let hw = F::BITS / 2;
+    let lo_mask = F::Int::MAX >> hw;
+
+    let significand_bits = F::SIG_BITS;
+    // Saturated exponent, representing infinity
+    let exponent_sat: F::Int = F::EXP_SAT.cast();
+
+    let exponent_bias = F::EXP_BIAS;
+    let implicit_bit = F::IMPLICIT_BIT;
+    let significand_mask = F::SIG_MASK;
+    let sign_bit = F::SIGN_MASK;
+    let abs_mask = sign_bit - one;
+    let exponent_mask = F::EXP_MASK;
+    let inf_rep = exponent_mask;
+    let quiet_bit = implicit_bit >> 1;
+    let qnan_rep = exponent_mask | quiet_bit;
+    let (mut half_iterations, full_iterations) = get_iterations::<F>();
+    let recip_precision = reciprocal_precision::<F>();
+
+    if F::BITS == 128 {
+        // FIXME(tgross35): f128 seems to require one more half iteration than expected
+        half_iterations += 1;
+    }
+
+    let a_rep = a.to_bits();
+    let b_rep = b.to_bits();
+
+    // Exponent numeric representationm not accounting for bias
+    let a_exponent = (a_rep >> significand_bits) & exponent_sat;
+    let b_exponent = (b_rep >> significand_bits) & exponent_sat;
+    let quotient_sign = (a_rep ^ b_rep) & sign_bit;
+
+    let mut a_significand = a_rep & significand_mask;
+    let mut b_significand = b_rep & significand_mask;
+
+    // The exponent of our final result in its encoded form
+    let mut res_exponent: i32 =
+        i32::cast_from(a_exponent) - i32::cast_from(b_exponent) + (exponent_bias as i32);
+
+    // Detect if a or b is zero, denormal, infinity, or NaN.
+    if a_exponent.wrapping_sub(one) >= (exponent_sat - one)
+        || b_exponent.wrapping_sub(one) >= (exponent_sat - one)
+    {
+        let a_abs = a_rep & abs_mask;
+        let b_abs = b_rep & abs_mask;
+
+        // NaN / anything = qNaN
+        if a_abs > inf_rep {
+            return F::from_bits(a_rep | quiet_bit);
+        }
+
+        // anything / NaN = qNaN
+        if b_abs > inf_rep {
+            return F::from_bits(b_rep | quiet_bit);
+        }
+
+        if a_abs == inf_rep {
+            if b_abs == inf_rep {
+                // infinity / infinity = NaN
+                return F::from_bits(qnan_rep);
+            } else {
+                // infinity / anything else = +/- infinity
+                return F::from_bits(a_abs | quotient_sign);
+            }
+        }
+
+        // anything else / infinity = +/- 0
+        if b_abs == inf_rep {
+            return F::from_bits(quotient_sign);
+        }
+
+        if a_abs == zero {
+            if b_abs == zero {
+                // zero / zero = NaN
+                return F::from_bits(qnan_rep);
+            } else {
+                // zero / anything else = +/- zero
+                return F::from_bits(quotient_sign);
+            }
+        }
+
+        // anything else / zero = +/- infinity
+        if b_abs == zero {
+            return F::from_bits(inf_rep | quotient_sign);
+        }
+
+        // a is denormal. Renormalize it and set the scale to include the necessary exponent
+        // adjustment.
+        if a_abs < implicit_bit {
+            let (exponent, significand) = F::normalize(a_significand);
+            res_exponent += exponent;
+            a_significand = significand;
+        }
+
+        // b is denormal. Renormalize it and set the scale to include the necessary exponent
+        // adjustment.
+        if b_abs < implicit_bit {
+            let (exponent, significand) = F::normalize(b_significand);
+            res_exponent -= exponent;
+            b_significand = significand;
+        }
+    }
+
+    // Set the implicit significand bit. If we fell through from the
+    // denormal path it was already set by normalize( ), but setting it twice
+    // won't hurt anything.
+    a_significand |= implicit_bit;
+    b_significand |= implicit_bit;
+
+    // Transform to a fixed-point representation by shifting the significand to the high bits. We
+    // know this is in the range [1.0, 2.0] since the implicit bit is set to 1 above.
+    let b_uq1 = b_significand << (F::BI
+
+use core::cell::Cell;
+use core::num::NonZero;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{array, assert_eq};
+
+#[test]
+fn array_from_ref() {
+    let value: String = "Hello World!".into();
+    let arr: &[String; 1] = array::from_ref(&value);
+    assert_eq!(&[value.clone()], arr);
+
+    const VALUE: &&str = &"Hello World!";
+    const ARR: &[&str; 1] = array::from_ref(VALUE);
+    assert_eq!(&[*VALUE], ARR);
+    assert!(core::ptr::eq(VALUE, &ARR[0]));
+}
+
+#[test]
+fn array_from_mut() {
+    let mut value: String = "Hello World".into();
+    let arr: &mut [String; 1] = array::from_mut(&mut value);
+    arr[0].push_str("!");
+    assert_eq!(&value, "Hello World!");
+}
+
+#[test]
+fn array_try_from() {
+    macro_rules! test {
+        ($($N:expr)+) => {
+            $({
+                type Array = [u8; $N];
+                let mut array: Array = [0; $N];
+                let slice: &[u8] = &array[..];
+
+                let result = <&Array>::try_from(slice);
+                assert_eq!(&array, result.unwrap());
+
+                let result = <Array>::try_from(slice);
+                assert_eq!(&array, &result.unwrap());
+
+                let mut_slice: &mut [u8] = &mut array[..];
+                let result = <&mut Array>::try_from(mut_slice);
+                assert_eq!(&[0; $N], result.unwrap());
+
+                let mut_slice: &mut [u8] = &mut array[..];
+                let result = <Array>::try_from(mut_slice);
+                assert_eq!(&array, &result.unwrap());
+            })+
+        }
+    }
+    test! {
+         0  1  2  3  4  5  6  7  8  9
+        10 11 12 13 14 15 16 17 18 19
+        20 21 22 23 24 25 26 27 28 29
+        30 31 32
+    }
+}
+
+#[test]
+fn iterator_collect() {
+    let arr = [0, 1, 2, 5, 9];
+    let v: Vec<_> = IntoIterator::into_iter(arr.clone()).collect();
+    assert_eq!(&arr[..], &v[..]);
+}
+
+#[test]
+fn iterator_rev_collect() {
+    let arr = [0, 1, 2, 5, 9];
+    let v: Vec<_> = IntoIterator::into_iter(arr.clone()).rev().collect();
+    assert_eq!(&v[..], &[9, 5, 2, 1, 0]);
+}
+
+#[test]
+fn iterator_nth() {
+    let v = [0, 1, 2, 3, 4];
+    for i in 0..v.len() {
+        assert_eq!(IntoIterator::into_iter(v.clone()).nth(i).unwrap(), v[i]);
+    }
+    assert_eq!(IntoIterator::into_iter(v.clone()).nth(v.len()), None);
+
+    let mut iter = IntoIterator::into_iter(v);
+    assert_eq!(iter.nth(2).unwrap(), v[2]);
+    assert_eq!(iter.nth(1).unwrap(), v[4]);
+}
+
+#[test]
+fn iterator_last() {
+    let v = [0, 1, 2, 3, 4];
+    assert_eq!(IntoIterator::into_iter(v).last().unwrap(), 4);
+    assert_eq!(IntoIterator::into_iter([0]).last().unwrap(), 0);
+
+    let mut it = IntoIterator::into_iter([0, 9, 2, 4]);
+    assert_eq!(it.next_back(), Some(4));
+    assert_eq!(it.last(), Some(2));
+}
+
+#[test]
+fn iterator_clone() {
+    let mut it = IntoIterator::into_iter([0, 2, 4, 6, 8]);
+    assert_eq!(it.next(), Some(0));
+    assert_eq!(it.next_back(), Some(8));
+    let mut clone = it.clone();
+    assert_eq!(it.next_back(), Some(6));
+    assert_eq!(clone.next_back(), Some(6));
+    assert_eq!(it.next_back(), Some(4));
+    assert_eq!(clone.next_back(), Some(4));
+    assert_eq!(it.next(), Some(2));
+    assert_eq!(clone.next(), Some(2));
+}
+
+#[test]
+fn iterator_fused() {
+    let mut it = IntoIterator::into_iter([0, 9, 2]);
+    assert_eq!(it.next(), Some(0));
+    assert_eq!(it.next(), Some(9));
+    assert_eq!(it.next(), Some(2));
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next(), None);
+}
+
+#[test]
+fn iterator_len() {
+    let mut it = IntoIterator::into_iter([0, 1, 2, 5, 9]);
+    assert_eq!(it.size_hint(), (5, Some(5)));
+    assert_eq!(it.len(), 5);
+    assert_eq!(it.is_empty(), false);
+
+    assert_eq!(it.next(), Some(0));
+    assert_eq!(it.size_hint(), (4, Some(4)));
+    assert_eq!(it.len(), 4);
+    assert_eq!(it.is_empty(), false);
+
+    assert_eq!(it.next_back(), Some(9));
+    assert_eq!(it.size_hint(), (3, Some(3)));
+    assert_eq!(it.len(), 3);
+    assert_eq!(it.is_empty(), false);
+
+    // Empty
+    let it = IntoIterator::into_iter([] as [String; 0]);
+    assert_eq!(it.size_hint(), (0, Some(0)));
+    assert_eq!(it.len(), 0);
+    assert_eq!(it.is_empty(), true);
+}
+
+#[test]
+fn iterator_count() {
+    let v = [0, 1, 2, 3, 4];
+    assert_eq!(IntoIterator::into_iter(v.clone()).count(), 5);
+
+    let mut iter2 = IntoIterator::into_iter(v);
+    iter2.next();
+    iter2.next();
+    assert_eq!(iter2.count(), 3);
+}
+
+#[test]
+fn iterator_flat_map() {
+    assert!((0..5).flat_map(|i| IntoIterator::into_iter([2 * i, 2 * i + 1])).eq(0..10));
+}
+
+#[test]
+fn iterator_debug() {
+    let arr = [0, 1, 2, 5, 9];
+    assert_eq!(format!("{:?}", IntoIterator::into_iter(arr)), "IntoIter([0, 1, 2, 5, 9])",);
+}
+
+#[test]
+fn iterator_drops() {
+    // This test makes sure the correct number of elements are dropped. The `R`
+    // type is just a reference to a `Cell` that is incremented when an `R` is
+    // dropped.
+
+    #[derive(Clone)]
+    struct Foo<'a>(&'a Cell<usize>);
+
+    impl Drop for Foo<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    fn five(i: &Cell<usize>) -> [Foo<'_>; 5] {
+        // This is somewhat verbose because `Foo` does not implement `Copy`
+        // since it implements `Drop`. Consequently, we cannot write
+        // `[Foo(i); 5]`.
+        [Foo(i), Foo(i), Foo(i), Foo(i), Foo(i)]
+    }
+
+    // Simple: drop new iterator.
+    let i = Cell::new(0);
+    {
+        IntoIterator::into_iter(five(&i));
+    }
+    assert_eq!(i.get(), 5);
+
+    // Call `next()` once.
+    let i = Cell::new(0);
+    {
+        let mut iter = IntoIterator::into_iter(five(&i));
+        let _x = iter.next();
+        assert_eq!(i.get(), 0);
+        assert_eq!(iter.count(), 4);
+        assert_eq!(i.get(), 4);
+    }
+    assert_eq!(i.get(), 5);
+
+    // Check `clone` and calling `next`/`next_back`.
+    let i = Cell::new(0);
+    {
+        let mut iter = IntoIterator::into_iter(five(&i));
+        iter.next();
+        assert_eq!(i.get(), 1);
+        iter.next_back();
+        assert_eq!(i.get(), 2);
+
+        let mut clone = iter.clone();
+        assert_eq!(i.get(), 2);
+
+        iter.next();
+        assert_eq!(i.get(), 3);
+
+        clone.next();
+        assert_eq!(i.get(), 4);
+
+        assert_eq!(clone.count(), 2);
+        assert_eq!(i.get(), 6);
+    }
+    assert_eq!(i.get(), 8);
+
+    // Check via `nth`.
+    let i = Cell::new(0);
+    {
+        let mut iter = IntoIterator::into_iter(five(&i));
+        let _x = iter.nth(2);
+        assert_eq!(i.get(), 2);
+        let _y = iter.last();
+        assert_eq!(i.get(), 3);
+    }
+    assert_eq!(i.get(), 5);
+
+    // Check every element.
+    let i = Cell::new(0);
+    for (index, _x) in IntoIterator::into_iter(five(&i)).enumerate() {
+        assert_eq!(i.get(), index);
+    }
+    assert_eq!(i.get(), 5);
+
+    let i = Cell::new(0);
+    for (index, _x) in IntoIterator::into_iter(five(&i)).rev().enumerate() {
+        assert_eq!(i.get(), index);
+    }
+    assert_eq!(i.get(), 5);
+}
+
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn array_default_impl_avoids_leaks_on_panic() {
+    use core::sync::atomic::AtomicUsize;
+    use core::sync::atomic::Ordering::Relaxed;
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Debug)]
+    struct Bomb(#[allow(dead_code)] usize);
+
+    impl Default for Bomb {
+        fn default() -> Bomb {
+            if COUNTER.load(Relaxed) == 3 {
+                panic!("bomb limit exceeded");
+            }
+
+            COUNTER.fetch_add(1, Relaxed);
+            Bomb(COUNTER.load(Relaxed))
+        }
+    }
+
+    impl Drop for Bomb {
+        fn drop(&mut self) {
+            COUNTER.fetch_sub(1, Relaxed);
+        }
+    }
+
+    let res = std::panic::catch_unwind(|| <[Bomb; 5]>::default());
+    let panic_msg = match res {
+        Ok(_) => unreachable!(),
+        Err(p) => p.downcast::<&'static str>().unwrap(),
+    };
+    assert_eq!(*panic_msg, "bomb limit exceeded");
+    // check that all
+
+//! ADI Devices
+
+use core::ffi::c_double;
+
+use crate::V5_DeviceT;
+
+#[repr(transparent)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+pub struct V5_AdiPortConfiguration(pub core::ffi::c_uchar);
+
+impl V5_AdiPortConfiguration {
+    pub const kAdiPortTypeAnalogIn: Self = Self(0);
+    pub const kAdiPortTypeAnalogOut: Self = Self(1);
+    pub const kAdiPortTypeDigitalIn: Self = Self(2);
+    pub const kAdiPortTypeDigitalOut: Self = Self(3);
+    pub const kAdiPortTypeSmartButton: Self = Self(4);
+    pub const kAdiPortTypeSmartPot: Self = Self(5);
+    pub const kAdiPortTypeLegacyButton: Self = Self(6);
+    pub const kAdiPortTypeLegacyPotentiometer: Self = Self(7);
+    pub const kAdiPortTypeLegacyLineSensor: Self = Self(8);
+    pub const kAdiPortTypeLegacyLightSensor: Self = Self(9);
+    pub const kAdiPortTypeLegacyGyro: Self = Self(10);
+    pub const kAdiPortTypeLegacyAccelerometer: Self = Self(11);
+    pub const kAdiPortTypeLegacyServo: Self = Self(12);
+    pub const kAdiPortTypeLegacyPwm: Self = Self(13);
+    pub const kAdiPortTypeQuadEncoder: Self = Self(14);
+    pub const kAdiPortTypeSonar: Self = Self(15);
+    pub const kAdiPortTypeLegacyPwmSlew: Self = Self(16);
+    pub const kAdiPortTypeUndefined: Self = Self(255);
+}
+
+#[repr(transparent)]
+#[derive(Default, Debug, Copy, Clone, Eq, PartialEq)]
+pub struct V5_DeviceBumperState(pub core::ffi::c_uchar);
+
+impl V5_DeviceBumperState {
+    pub const kBumperReleased: Self = Self(0);
+    pub const kBumperPressed: Self = Self(1);
+}
+
+unsafe extern "system" {
+    pub fn vexDeviceAdiPortConfigSet(
+        device: V5_DeviceT,
+        port: u32,
+        config: V5_AdiPortConfiguration,
+    );
+    pub fn vexDeviceAdiPortConfigGet(device: V5_DeviceT, port: u32) -> V5_AdiPortConfiguration;
+    pub fn vexDeviceAdiValueSet(device: V5_DeviceT, port: u32, value: i32);
+    pub fn vexDeviceAdiValueGet(device: V5_DeviceT, port: u32) -> i32;
+    pub fn vexDeviceAdiAddrLedSet(
+        device: V5_DeviceT,
+        port: u32,
+        pData: *mut u32,
+        nOffset: u32,
+        nLength: u32,
+        options: u32,
+    );
+    pub fn vexDeviceBumperGet(device: V5_DeviceT) -> V5_DeviceBumperState;
+    pub fn vexDeviceGyroReset(device: V5_DeviceT);
+    pub fn vexDeviceGyroHeadingGet(device: V5_DeviceT) -> c_double;
+    pub fn vexDeviceGyroDegreesGet(device: V5_DeviceT) -> c_double;
+    pub fn vexDeviceSonarValueGet(device: V5_DeviceT) -> i32;
+}
+
+
+//! Streaming compression functionality.
+
+use alloc::boxed::Box;
+use core::convert::TryInto;
+use core::{cmp, mem};
+
+use super::super::*;
+use super::deflate_flags::*;
+use super::CompressionLevel;
+use crate::deflate::buffer::{
+    update_hash, HashBuffers, LocalBuf, LZ_CODE_BUF_MASK, LZ_CODE_BUF_SIZE, LZ_DICT_FULL_SIZE,
+    LZ_HASH_BITS, LZ_HASH_SHIFT, LZ_HASH_SIZE, OUT_BUF_SIZE,
+};
+use crate::deflate::stored::compress_stored;
+use crate::deflate::zlib;
+use crate::shared::{update_adler32, HUFFMAN_LENGTH_ORDER, MZ_ADLER32_INIT};
+use crate::DataFormat;
+
+// Currently not bubbled up outside this module, so can fill in with more
+// context eventually if needed.
+type Result<T, E = Error> = core::result::Result<T, E>;
+pub(crate) struct Error {}
+
+pub(crate) const MAX_PROBES_MASK: u32 = 0xFFF;
+
+const MAX_SUPPORTED_HUFF_CODESIZE: usize = 15;
+
+// Length code for length values - 256.
+// We use an offset to help with bound check avoidance as we can mask values to 32
+// and it also saves some memory as we can use a u8 instead of a u16.
+// Conventiently our table is large enough that we can get away with using an
+// offset of 256 which results in very efficient code.
+const LEN_SYM: [u8; 256] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 13, 13, 14, 14, 14, 14, 15, 15,
+    15, 15, 16, 16, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17, 18, 18, 18, 18, 18, 18, 18, 18, 19, 19,
+    19, 19, 19, 19, 19, 19, 20, 20, 20, 20, 20, 20, 20, 20, 21, 21, 21, 21, 21, 21, 21, 21, 21, 21,
+    21, 21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 23, 23,
+    23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 23, 24, 24, 24, 24, 24, 24, 24, 24, 24, 24,
+    24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25,
+    25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26,
+    26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 27, 27,
+    27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+    27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29,
+];
+
+const LEN_SYM_OFFSET: usize = 256;
+
+/// Number of extra bits for length values.
+#[rustfmt::skip]
+const LEN_EXTRA: [u8; 256] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 0
+];
+
+/// Distance codes for distances smaller than 512.
+#[rustfmt::skip]
+const SMALL_DIST_SYM: [u8; 512] = [
+     0,  1,  2,  3,  4,  4,  5,  5,  6,  6,  6,  6,  7,  7,  7,  7,
+     8,  8,  8,  8,  8,  8,  8,  8,  9,  9,  9,  9,  9,  9,  9,  9,
+    10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10,
+    11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11, 11,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12,
+    13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17
+];
+
+/// Number of extra bits for distances smaller than 512.
+#[rustfmt::skip]
+const SMALL_DIST_EXTRA: [u8; 512] = [
+    0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+];
+
+/// Base values to calculate distances above 512.
+#[rustfmt::skip]
+const LARGE_DIST_SYM: [u8; 128] = [
+     0,  0, 18, 19, 20, 20, 21, 21, 22, 22, 22, 22, 23, 23, 23, 23,
+    24, 24, 24, 24, 24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 25,
+    26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26, 26,
+    27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27, 27,
+    28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28,
+    29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29,
+    29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29
+];
+
+/// Number of extra bits distances above 512.
+#[rustfmt::skip]
+const LARGE_DIST_EXTRA: [u8; 128] = [
+     0,  0,  8,  8,  9,  9,  
+
+//! Header: `signal.h`
+
+use super::*;
+use crate::prelude::*;
+
+// Standard signal numbers
+pub const SIGHUP: c_int = 1;
+pub const SIGINT: c_int = 2;
+pub const SIGQUIT: c_int = 3;
+pub const SIGILL: c_int = 4;
+pub const SIGTRAP: c_int = 5;
+pub const SIGABRT: c_int = 6;
+pub const SIGBUS: c_int = 7;
+pub const SIGFPE: c_int = 8;
+pub const SIGKILL: c_int = 9;
+pub const SIGUSR1: c_int = 10;
+pub const SIGSEGV: c_int = 11;
+pub const SIGUSR2: c_int = 12;
+pub const SIGPIPE: c_int = 13;
+pub const SIGALRM: c_int = 14;
+pub const SIGTERM: c_int = 15;
+pub const SIGSTKFLT: c_int = 16;
+pub const SIGCHLD: c_int = 17;
+pub const SIGCONT: c_int = 18;
+pub const SIGSTOP: c_int = 19;
+pub const SIGTSTP: c_int = 20;
+pub const SIGTTIN: c_int = 21;
+pub const SIGTTOU: c_int = 22;
+pub const SIGURG: c_int = 23;
+pub const SIGXCPU: c_int = 24;
+pub const SIGXFSZ: c_int = 25;
+pub const SIGVTALRM: c_int = 26;
+pub const SIGPROF: c_int = 27;
+pub const SIGWINCH: c_int = 28;
+pub const SIGIO: c_int = 29;
+pub const SIGPWR: c_int = 30;
+pub const SIGSYS: c_int = 31;
+
+// Signal handling constants
+pub const SIG_DFL: sighandler_t = 0 as sighandler_t;
+pub const SIG_IGN: sighandler_t = 1 as sighandler_t;
+pub const SIG_ERR: sighandler_t = !0 as sighandler_t;
+
+// Signal mask operations (QuRT uses different values than Linux)
+pub const SIG_BLOCK: c_int = 1;
+pub const SIG_UNBLOCK: c_int = 2;
+pub const SIG_SETMASK: c_int = 3;
+
+// QuRT-specific signal constants
+pub const POSIX_MSG: c_int = 7;
+pub const POSIX_NOTIF: c_int = 8;
+pub const SIGRTMIN: c_int = 10;
+pub const SIGRTMAX: c_int = 32;
+
+// Notification types (from QuRT signal.h)
+pub const SIGEV_NONE: c_int = 0;
+pub const SIGEV_SIGNAL: c_int = 1;
+pub const SIGEV_THREAD: c_int = 2;
+pub const SA_SIGINFO: c_int = 1;
+
+pub type sighandler_t = size_t;
+
+// Signal structures based on QuRT SDK headers
+s! {
+    pub struct sigval {
+        pub sival_int: c_int,
+        pub sival_ptr: *mut c_void,
+    }
+
+    pub struct sigevent {
+        pub sigev_notify: c_int,
+        pub sigev_signo: c_int,
+        pub sigev_value: sigval,
+        pub sigev_notify_function: Option<extern "C" fn(sigval)>,
+        pub sigev_notify_attributes: *mut pthread_attr_t,
+    }
+
+    pub struct siginfo_t {
+        pub si_signo: c_int,
+        pub si_code: c_int,
+        pub si_value: sigval,
+    }
+
+    pub struct sigaction {
+        pub sa_handler: Option<extern "C" fn(c_int)>,
+        pub sa_mask: sigset_t,
+        pub sa_flags: c_int,
+        pub sa_sigaction: Option<extern "C" fn(c_int, *mut siginfo_t, *mut c_void)>,
+    }
+}
+
+extern "C" {
+    pub fn signal(sig: c_int, handler: sighandler_t) -> sighandler_t;
+    pub fn kill(pid: pid_t, sig: c_int) -> c_int;
+    pub fn raise(sig: c_int) -> c_int;
+    pub fn alarm(seconds: c_uint) -> c_uint;
+    pub fn pause() -> c_int;
+
+    // Signal mask functions
+    pub fn sigemptyset(set: *mut sigset_t) -> c_int;
+    pub fn sigfillset(set: *mut sigset_t) -> c_int;
+    pub fn sigaddset(set: *mut sigset_t, signum: c_int) -> c_int;
+    pub fn sigdelset(set: *mut sigset_t, signum: c_int) -> c_int;
+    pub fn sigismember(set: *const sigset_t, signum: c_int) -> c_int;
+    pub fn sigprocmask(how: c_int, set: *const sigset_t, oldset: *mut sigset_t) -> c_int;
+    pub fn sigpending(set: *mut sigset_t) -> c_int;
+    pub fn sigsuspend(mask: *const sigset_t) -> c_int;
+
+    // QuRT-specific signal functions
+    pub fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
+    pub fn _sigaction(sig: c_int, act: *const sigaction, oact: *mut sigaction) -> c_int;
+    pub fn sigtimedwait(
+        set: *const sigset_t,
+        info: *mut siginfo_t,
+        timeout: *const timespec,
+    ) -> c_int;
+}
+
+
+//! Parsing of GCC-style Language-Specific Data Area (LSDA)
+//! For details see:
+//!  * <https://refspecs.linuxfoundation.org/LSB_3.0.0/LSB-PDA/LSB-PDA/ehframechpt.html>
+//!  * <https://refspecs.linuxfoundation.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/dwarfext.html>
+//!  * <https://itanium-cxx-abi.github.io/cxx-abi/exceptions.pdf>
+//!  * <https://www.airs.com/blog/archives/460>
+//!  * <https://www.airs.com/blog/archives/464>
+//!
+//! A reference implementation may be found in the GCC source tree
+//! (`<root>/libgcc/unwind-c.c` as of this writing).
+
+#![allow(non_upper_case_globals)]
+#![allow(unused)]
+
+use core::ptr;
+
+use super::DwarfReader;
+
+pub const DW_EH_PE_omit: u8 = 0xFF;
+pub const DW_EH_PE_absptr: u8 = 0x00;
+
+pub const DW_EH_PE_uleb128: u8 = 0x01;
+pub const DW_EH_PE_udata2: u8 = 0x02;
+pub const DW_EH_PE_udata4: u8 = 0x03;
+pub const DW_EH_PE_udata8: u8 = 0x04;
+pub const DW_EH_PE_sleb128: u8 = 0x09;
+pub const DW_EH_PE_sdata2: u8 = 0x0A;
+pub const DW_EH_PE_sdata4: u8 = 0x0B;
+pub const DW_EH_PE_sdata8: u8 = 0x0C;
+
+pub const DW_EH_PE_pcrel: u8 = 0x10;
+pub const DW_EH_PE_textrel: u8 = 0x20;
+pub const DW_EH_PE_datarel: u8 = 0x30;
+pub const DW_EH_PE_funcrel: u8 = 0x40;
+pub const DW_EH_PE_aligned: u8 = 0x50;
+
+pub const DW_EH_PE_indirect: u8 = 0x80;
+
+#[derive(Copy, Clone)]
+pub struct EHContext<'a> {
+    pub ip: *const u8,                             // Current instruction pointer
+    pub func_start: *const u8,                     // Pointer to the current function
+    pub get_text_start: &'a dyn Fn() -> *const u8, // Get pointer to the code section
+    pub get_data_start: &'a dyn Fn() -> *const u8, // Get pointer to the data section
+}
+
+/// Landing pad.
+type LPad = *const u8;
+pub enum EHAction {
+    None,
+    Cleanup(LPad),
+    Catch(LPad),
+    Filter(LPad),
+    Terminate,
+}
+
+/// 32-bit ARM Darwin platforms uses SjLj exceptions.
+///
+/// The exception is watchOS armv7k (specifically that subarchitecture), which
+/// instead uses DWARF Call Frame Information (CFI) unwinding.
+///
+/// <https://github.com/llvm/llvm-project/blob/llvmorg-18.1.4/clang/lib/Driver/ToolChains/Darwin.cpp#L3107-L3119>
+pub const USING_SJLJ_EXCEPTIONS: bool =
+    cfg!(all(target_vendor = "apple", not(target_os = "watchos"), target_arch = "arm"));
+
+pub unsafe fn find_eh_action(lsda: *const u8, context: &EHContext<'_>) -> Result<EHAction, ()> {
+    if lsda.is_null() {
+        return Ok(EHAction::None);
+    }
+
+    let func_start = context.func_start;
+    let mut reader = DwarfReader::new(lsda);
+    let lpad_base = unsafe {
+        let start_encoding = reader.read::<u8>();
+        // base address for landing pad offsets
+        if start_encoding != DW_EH_PE_omit {
+            read_encoded_pointer(&mut reader, context, start_encoding)?
+        } else {
+            func_start
+        }
+    };
+    let call_site_encoding = unsafe {
+        let ttype_encoding = reader.read::<u8>();
+        if ttype_encoding != DW_EH_PE_omit {
+            // Rust doesn't analyze exception types, so we don't care about the type table
+            reader.read_uleb128();
+        }
+
+        reader.read::<u8>()
+    };
+    let action_table = unsafe {
+        let call_site_table_length = reader.read_uleb128();
+        reader.ptr.add(call_site_table_length as usize)
+    };
+    let ip = context.ip;
+
+    if !USING_SJLJ_EXCEPTIONS {
+        // read the callsite table
+        while reader.ptr < action_table {
+            unsafe {
+                // these are offsets rather than pointers;
+                let cs_start = read_encoded_offset(&mut reader, call_site_encoding)?;
+                let cs_len = read_encoded_offset(&mut reader, call_site_encoding)?;
+                let cs_lpad = read_encoded_offset(&mut reader, call_site_encoding)?;
+                let cs_action_entry = reader.read_uleb128();
+                // Callsite table is sorted by cs_start, so if we've passed the ip, we
+                // may stop searching.
+                if ip < func_start.wrapping_add(cs_start) {
+                    break;
+                }
+                if ip < func_start.wrapping_add(cs_start + cs_len) {
+                    if cs_lpad == 0 {
+                        return Ok(EHAction::None);
+                    } else {
+                        let lpad = lpad_base.wrapping_add(cs_lpad);
+                        return Ok(interpret_cs_action(action_table, cs_action_entry, lpad));
+                    }
+                }
+            }
+        }
+        // Ip is not present in the table. This indicates a nounwind call.
+        Ok(EHAction::Terminate)
+    } else {
+        // SjLj version:
+        // The "IP" is an index into the call-site table, with two exceptions:
+        // -1 means 'no-action', and 0 means 'terminate'.
+        match ip.addr() as isize {
+            -1 => return Ok(EHAction::None),
+            0 => return Ok(EHAction::Terminate),
+            _ => (),
+        }
+        let mut idx = ip.addr();
+        loop {
+            let cs_lpad = unsafe { reader.read_uleb128() };
+            let cs_action_entry = unsafe { reader.read_uleb128() };
+            idx -= 1;
+            if idx == 0 {
+                // Can never have null landing pad for sjlj -- that would have
+                // been indicated by a -1 call site index.
+                // FIXME(strict provenance)
+                let lpad = ptr::with_exposed_provenance((cs_lpad + 1) as usize);
+                return Ok(unsafe { interpret_cs_action(action_table, cs_action_entry, lpad) });
+            }
+        }
+    }
+}
+
+unsafe fn interpret_cs_action(
+    action_table: *const u8,
+    cs_action_entry: u64,
+    lpad: LPad,
+) -> EHAction {
+    if cs_action_entry == 0 {
+        // If cs_action_entry is 0 then this is a cleanup (Drop::drop). We run these
+        // for both Rust panics and foreign exceptions.
+        EHAction::Cleanup(lpad)
+    } else {
+        // If lpad != 0 and cs_action_entry != 0, we have to check ttype_index.
+        // If ttype_index == 0 under the condition, we take cleanup action.
+        let action_record = unsafe { action_table.offset(cs_action_entry as isize - 1) };
+        let mut action_reader = DwarfReader::new(action_record);
+        let ttype_index = unsafe { action_reader.read_sleb128() };
+        if ttype_index == 0 {
+            EHAction::Cleanup(lpad)
+        } else if ttype_index > 0 {
+            // Stop unwinding Rust panics at catch_unwind.
+            EHAction::Catch(lpad)
+        } else {
+            EHAction::Filter(lpad)
+        }
+    }
+}
+
+#[inline]
+fn round_up(unrounded: usize, align: usize) -> Result<usize, ()> {
+    if align.is_power_of_two() { Ok((unrounded + align - 1) & !(align - 1)) } else { Err(()) }
+}
+
+/// Reads an offset (`usize`) from `reader` whose encoding is described by `encoding`.
+///
+/// `encoding` must be a [DWARF Exception Header Encoding as described by the LSB spec][LSB-dwarf-ext].
+/// In addition the upper ("application") part must be zero.
+///
+/// # Errors
+/// Returns `Err` if `encoding`
+/// * is not a valid DWARF Exception Header Encoding,
+/// * is `DW_EH_PE_omit`, or
+/// * has a non-zero application part.
+///
+/// [LSB-dwarf-ext]: https://refspecs.linuxfoundation.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/dwarfext.html
+unsafe fn read_encoded_offset(reader: &mut DwarfReader, encoding: u8) -> Result<usize, ()> {
+    if encoding == DW_EH_PE_omit || encoding & 0xF0 != 0 {
+        return Err(());
+    }
+    let result = unsafe {
+        match encoding & 0x0F {
+            // despite the name, LLVM also uses absptr for offsets instead of pointers
+            DW_EH_PE_absptr => reader.read::<usize>(),
+            DW_EH_PE_uleb128 => reader.read_uleb128() as usize,
+            DW_EH_PE_udata2 => reader.read::<u16>() as usize,
+            DW_EH_PE_udata4 => reader.read::<u32>() as usize,
+            DW_EH_PE_udata8 => reader.read::<u64>() as usize,
+            DW_EH_PE_sleb128 => reader.read_sleb128() as usize,
+            DW_EH_PE_sdata2 => reader.read::<i16>() as usize,
+            DW_EH_PE_sdata4 => reader.read::<
+
+/*!
+This module defines 128-bit vector implementations of `memchr` and friends.
+
+The main types in this module are [`One`], [`Two`] and [`Three`]. They are for
+searching for one, two or three distinct bytes, respectively, in a haystack.
+Each type also has corresponding double ended iterators. These searchers are
+typically much faster than scalar routines accomplishing the same task.
+
+The `One` searcher also provides a [`One::count`] routine for efficiently
+counting the number of times a single byte occurs in a haystack. This is
+useful, for example, for counting the number of lines in a haystack. This
+routine exists because it is usually faster, especially with a high match
+count, then using [`One::find`] repeatedly. ([`OneIter`] specializes its
+`Iterator::count` implementation to use this routine.)
+
+Only one, two and three bytes are supported because three bytes is about
+the point where one sees diminishing returns. Beyond this point and it's
+probably (but not necessarily) better to just use a simple `[bool; 256]` array
+or similar. However, it depends mightily on the specific work-load and the
+expected match frequency.
+*/
+
+use core::arch::aarch64::uint8x16_t;
+
+use crate::{arch::generic::memchr as generic, ext::Pointer, vector::Vector};
+
+/// Finds all occurrences of a single byte in a haystack.
+#[derive(Clone, Copy, Debug)]
+pub struct One(generic::One<uint8x16_t>);
+
+impl One {
+    /// Create a new searcher that finds occurrences of the needle byte given.
+    ///
+    /// This particular searcher is specialized to use neon vector instructions
+    /// that typically make it quite fast.
+    ///
+    /// If neon is unavailable in the current environment, then `None` is
+    /// returned.
+    #[inline]
+    pub fn new(needle: u8) -> Option<One> {
+        if One::is_available() {
+            // SAFETY: we check that neon is available above.
+            unsafe { Some(One::new_unchecked(needle)) }
+        } else {
+            None
+        }
+    }
+
+    /// Create a new finder specific to neon vectors and routines without
+    /// checking that neon is available.
+    ///
+    /// # Safety
+    ///
+    /// Callers must guarantee that it is safe to execute `neon` instructions
+    /// in the current environment.
+    ///
+    /// Note that it is a common misconception that if one compiles for an
+    /// `x86_64` target, then they therefore automatically have access to neon
+    /// instructions. While this is almost always the case, it isn't true in
+    /// 100% of cases.
+    #[target_feature(enable = "neon")]
+    #[inline]
+    pub unsafe fn new_unchecked(needle: u8) -> One {
+        One(generic::One::new(needle))
+    }
+
+    /// Returns true when this implementation is available in the current
+    /// environment.
+    ///
+    /// When this is true, it is guaranteed that [`One::new`] will return
+    /// a `Some` value. Similarly, when it is false, it is guaranteed that
+    /// `One::new` will return a `None` value.
+    ///
+    /// Note also that for the lifetime of a single program, if this returns
+    /// true then it will always return true.
+    #[inline]
+    pub fn is_available() -> bool {
+        #[cfg(target_feature = "neon")]
+        {
+            true
+        }
+        #[cfg(not(target_feature = "neon"))]
+        {
+            false
+        }
+    }
+
+    /// Return the first occurrence of one of the needle bytes in the given
+    /// haystack. If no such occurrence exists, then `None` is returned.
+    ///
+    /// The occurrence is reported as an offset into `haystack`. Its maximum
+    /// value is `haystack.len() - 1`.
+    #[inline]
+    pub fn find(&self, haystack: &[u8]) -> Option<usize> {
+        // SAFETY: `find_raw` guarantees that if a pointer is returned, it
+        // falls within the bounds of the start and end pointers.
+        unsafe {
+            generic::search_slice_with_raw(haystack, |s, e| {
+                self.find_raw(s, e)
+            })
+        }
+    }
+
+    /// Return the last occurrence of one of the needle bytes in the given
+    /// haystack. If no such occurrence exists, then `None` is returned.
+    ///
+    /// The occurrence is reported as an offset into `haystack`. Its maximum
+    /// value is `haystack.len() - 1`.
+    #[inline]
+    pub fn rfind(&self, haystack: &[u8]) -> Option<usize> {
+        // SAFETY: `rfind_raw` guarantees that if a pointer is returned, it
+        // falls within the bounds of the start and end pointers.
+        unsafe {
+            generic::search_slice_with_raw(haystack, |s, e| {
+                self.rfind_raw(s, e)
+            })
+        }
+    }
+
+    /// Counts all occurrences of this byte in the given haystack.
+    #[inline]
+    pub fn count(&self, haystack: &[u8]) -> usize {
+        // SAFETY: All of our pointers are derived directly from a borrowed
+        // slice, which is guaranteed to be valid.
+        unsafe {
+            let start = haystack.as_ptr();
+            let end = start.add(haystack.len());
+            self.count_raw(start, end)
+        }
+    }
+
+    /// Like `find`, but accepts and returns raw pointers.
+    ///
+    /// When a match is found, the pointer returned is guaranteed to be
+    /// `>= start` and `< end`.
+    ///
+    /// This routine is useful if you're already using raw pointers and would
+    /// like to avoid converting back to a slice before executing a search.
+    ///
+    /// # Safety
+    ///
+    /// * Both `start` and `end` must be valid for reads.
+    /// * Both `start` and `end` must point to an initialized value.
+    /// * Both `start` and `end` must point to the same allocated object and
+    /// must either be in bounds or at most one byte past the end of the
+    /// allocated object.
+    /// * Both `start` and `end` must be _derived from_ a pointer to the same
+    /// object.
+    /// * The distance between `start` and `end` must not overflow `isize`.
+    /// * The distance being in bounds must not rely on "wrapping around" the
+    /// address space.
+    ///
+    /// Note that callers may pass a pair of pointers such that `start >= end`.
+    /// In that case, `None` will always be returned.
+    #[inline]
+    pub unsafe fn find_raw(
+        &self,
+        start: *const u8,
+        end: *const u8,
+    ) -> Option<*const u8> {
+        if start >= end {
+            return None;
+        }
+        if end.distance(start) < uint8x16_t::BYTES {
+            // SAFETY: We require the caller to pass valid start/end pointers.
+            return generic::fwd_byte_by_byte(start, end, |b| {
+                b == self.0.needle1()
+            });
+        }
+        // SAFETY: Building a `One` means it's safe to call 'neon' routines.
+        // Also, we've checked that our haystack is big enough to run on the
+        // vector routine. Pointer validity is caller's responsibility.
+        self.find_raw_impl(start, end)
+    }
+
+    /// Like `rfind`, but accepts and returns raw pointers.
+    ///
+    /// When a match is found, the pointer returned is guaranteed to be
+    /// `>= start` and `< end`.
+    ///
+    /// This routine is useful if you're already using raw pointers and would
+    /// like to avoid converting back to a slice before executing a search.
+    ///
+    /// # Safety
+    ///
+    /// * Both `start` and `end` must be valid for reads.
+    /// * Both `start` and `end` must point to an initialized value.
+    /// * Both `start` and `end` must point to the same allocated object and
+    /// must either be in bounds or at most one byte past the end of the
+    /// allocated object.
+    /// * Both `start` and `end` must be _derived from_ a pointer to the same
+    /// object.
+    /// * The distance between `start` and `end` must not overflow `isize`.
+    /// * The distance being in bounds must not rely on "wrapping around" the
+    /// address space.
+    ///
+    /// Note that callers may pass a pair of pointers such that `start >= end`.
+    /// In that case, `None` will always be returned.
+    #[inline]
+    pub unsafe fn rfind_raw(
+        &self,
+        start: *const u8,
+        end: *const u8,
+    ) -> Opt
+
+use crate::off_t;
+use crate::prelude::*;
+
+// APIs in FreeBSD 15 that have changed since 11.
+
+pub type nlink_t = u64;
+pub type dev_t = u64;
+pub type ino_t = u64;
+pub type shmatt_t = c_uint;
+pub type kpaddr_t = u64;
+pub type kssize_t = i64;
+pub type domainset_t = __c_anonymous_domainset;
+
+s! {
+    pub struct shmid_ds {
+        pub shm_perm: crate::ipc_perm,
+        pub shm_segsz: size_t,
+        pub shm_lpid: crate::pid_t,
+        pub shm_cpid: crate::pid_t,
+        pub shm_nattch: crate::shmatt_t,
+        pub shm_atime: crate::time_t,
+        pub shm_dtime: crate::time_t,
+        pub shm_ctime: crate::time_t,
+    }
+
+    pub struct kevent {
+        pub ident: crate::uintptr_t,
+        pub filter: c_short,
+        pub flags: c_ushort,
+        pub fflags: c_uint,
+        pub data: i64,
+        pub udata: *mut c_void,
+        pub ext: [u64; 4],
+    }
+
+    pub struct kvm_page {
+        pub kp_version: crate::u_int,
+        pub kp_paddr: crate::kpaddr_t,
+        pub kp_kmap_vaddr: crate::kvaddr_t,
+        pub kp_dmap_vaddr: crate::kvaddr_t,
+        pub kp_prot: crate::vm_prot_t,
+        pub kp_offset: off_t,
+        pub kp_len: size_t,
+    }
+
+    pub struct __c_anonymous_domainset {
+        #[cfg(target_pointer_width = "64")]
+        _priv: [c_ulong; 4],
+        #[cfg(target_pointer_width = "32")]
+        _priv: [c_ulong; 8],
+    }
+
+    #[non_exhaustive]
+    pub struct kinfo_proc {
+        /// Size of this structure.
+        pub ki_structsize: c_int,
+        /// Reserved: layout identifier.
+        pub ki_layout: c_int,
+        /// Address of command arguments.
+        pub ki_args: *mut crate::pargs,
+        // This is normally "struct proc".
+        /// Address of proc.
+        pub ki_paddr: *mut c_void,
+        // This is normally "struct user".
+        /// Kernel virtual address of u-area.
+        pub ki_addr: *mut c_void,
+        // This is normally "struct vnode".
+        /// Pointer to trace file.
+        pub ki_tracep: *mut c_void,
+        // This is normally "struct vnode".
+        /// Pointer to executable file.
+        pub ki_textvp: *mut c_void,
+        /// Pointer to open file info.
+        pub ki_fd: *mut crate::filedesc,
+        // This is normally "struct vmspace".
+        /// Pointer to kernel vmspace struct.
+        pub ki_vmspace: *mut c_void,
+        /// Sleep address.
+        pub ki_wchan: *const c_void,
+        /// Process identifier.
+        pub ki_pid: crate::pid_t,
+        /// Parent process ID.
+        pub ki_ppid: crate::pid_t,
+        /// Process group ID.
+        pub ki_pgid: crate::pid_t,
+        /// tty process group ID.
+        pub ki_tpgid: crate::pid_t,
+        /// Process session ID.
+        pub ki_sid: crate::pid_t,
+        /// Terminal session ID.
+        pub ki_tsid: crate::pid_t,
+        /// Job control counter.
+        pub ki_jobc: c_short,
+        /// Unused (just here for alignment).
+        pub ki_spare_short1: c_short,
+        /// Controlling tty dev.
+        pub ki_tdev_freebsd11: u32,
+        /// Signals arrived but not delivered.
+        pub ki_siglist: crate::sigset_t,
+        /// Current signal mask.
+        pub ki_sigmask: crate::sigset_t,
+        /// Signals being ignored.
+        pub ki_sigignore: crate::sigset_t,
+        /// Signals being caught by user.
+        pub ki_sigcatch: crate::sigset_t,
+        /// Effective user ID.
+        pub ki_uid: crate::uid_t,
+        /// Real user ID.
+        pub ki_ruid: crate::uid_t,
+        /// Saved effective user ID.
+        pub ki_svuid: crate::uid_t,
+        /// Real group ID.
+        pub ki_rgid: crate::gid_t,
+        /// Saved effective group ID.
+        pub ki_svgid: crate::gid_t,
+        /// Number of groups.
+        pub ki_ngroups: c_short,
+        /// Unused (just here for alignment).
+        pub ki_spare_short2: c_short,
+        /// Groups.
+        pub ki_groups: [crate::gid_t; crate::KI_NGROUPS],
+        /// Virtual size.
+        pub ki_size: crate::vm_size_t,
+        /// Current resident set size in pages.
+        pub ki_rssize: crate::segsz_t,
+        /// Resident set size before last swap.
+        pub ki_swrss: crate::segsz_t,
+        /// Text size (pages) XXX.
+        pub ki_tsize: crate::segsz_t,
+        /// Data size (pages) XXX.
+        pub ki_dsize: crate::segsz_t,
+        /// Stack size (pages).
+        pub ki_ssize: crate::segsz_t,
+        /// Exit status for wait & stop signal.
+        pub ki_xstat: crate::u_short,
+        /// Accounting flags.
+        pub ki_acflag: crate::u_short,
+        /// %cpu for process during `ki_swtime`.
+        pub ki_pctcpu: crate::fixpt_t,
+        /// Time averaged value of `ki_cpticks`.
+        pub ki_estcpu: crate::u_int,
+        /// Time since last blocked.
+        pub ki_slptime: crate::u_int,
+        /// Time swapped in or out.
+        pub ki_swtime: crate::u_int,
+        /// Number of copy-on-write faults.
+        pub ki_cow: crate::u_int,
+        /// Real time in microsec.
+        pub ki_runtime: u64,
+        /// Starting time.
+        pub ki_start: crate::timeval,
+        /// Time used by process children.
+        pub ki_childtime: crate::timeval,
+        /// P_* flags.
+        pub ki_flag: c_long,
+        /// KI_* flags (below).
+        pub ki_kiflag: c_long,
+        /// Kernel trace points.
+        pub ki_traceflag: c_int,
+        /// S* process status.
+        pub ki_stat: c_char,
+        /// Process "nice" value.
+        pub ki_nice: i8, // signed char
+        /// Process lock (prevent swap) count.
+        pub ki_lock: c_char,
+        /// Run queue index.
+        pub ki_rqindex: c_char,
+        /// Which cpu we are on.
+        pub ki_oncpu_old: c_uchar,
+        /// Last cpu we were on.
+        pub ki_lastcpu_old: c_uchar,
+        /// Thread name.
+        pub ki_tdname: [c_char; crate::TDNAMLEN + 1],
+        /// Wchan message.
+        pub ki_wmesg: [c_char; crate::WMESGLEN + 1],
+        /// Setlogin name.
+        pub ki_login: [c_char; crate::LOGNAMELEN + 1],
+        /// Lock name.
+        pub ki_lockname: [c_char; crate::LOCKNAMELEN + 1],
+        /// Command name.
+        pub ki_comm: [c_char; crate::COMMLEN + 1],
+        /// Emulation name.
+        pub ki_emul: [c_char; crate::KI_EMULNAMELEN + 1],
+        /// Login class.
+        pub ki_loginclass: [c_char; crate::LOGINCLASSLEN + 1],
+        /// More thread name.
+        pub ki_moretdname: [c_char; crate::MAXCOMLEN - crate::TDNAMLEN + 1],
+        /// Spare string space.
+        pub ki_sparestrings: [[c_char; 23]; 2], // little hack to allow PartialEq
+        /// Spare room for growth.
+        pub ki_spareints: [c_int; crate::KI_NSPARE_INT],
+        /// Controlling tty dev.
+        pub ki_tdev: u64,
+        /// Which cpu we are on.
+        pub ki_oncpu: c_int,
+        /// Last cpu we were on.
+        pub ki_lastcpu: c_int,
+        /// PID of tracing process.
+        pub ki_tracer: c_int,
+        /// P2_* flags.
+        pub ki_flag2: c_int,
+        /// Default FIB number.
+        pub ki_fibnum: c_int,
+        /// Credential flags.
+        pub ki_cr_flags: crate::u_int,
+        /// Process jail ID.
+        pub ki_jid: c_int,
+        /// Number of threads in total.
+        pub ki_numthreads: c_int,
+        /// Thread ID.
+        pub ki_tid: crate::lwpid_t,
+        /// Process priority.
+        pub ki_pri: crate::priority,
+        /// Process rusage statistics.
+        pub ki_rusage: crate::rusage,
+        /// rusage of children processes.
+        pub ki_rusage_ch: crate::rusage,
+        // This is normally "struct pcb".
+        /// Kernel virtual addr of pcb.
+        pub ki_pcb: *mut c_void,
+        /// Kernel virtual addr of stack.
+        pub ki_kstack: *mut c_void,
+        /// User convenience pointer.
+        pub ki_udata: *mut c_void,
+        // This is normally "struct thread".
+        pub ki_tdaddr: *mut c_void,
+        // This is normally "struct pwddesc".
+        /// Pointer to process paths info.
+        pub ki_pd: *mut c_void,
+        /// Address of the ext err msg place
+        pub ki_uerrmsg: *mut c_void,
+        pub ki_spareptrs: [*mut c_void;
+
+use super::id::ThreadId;
+use super::main_thread;
+use super::thread::Thread;
+use crate::mem::ManuallyDrop;
+use crate::ptr;
+use crate::sys::thread as imp;
+use crate::sys::thread_local::local_pointer;
+
+const NONE: *mut () = ptr::null_mut();
+const BUSY: *mut () = ptr::without_provenance_mut(1);
+const DESTROYED: *mut () = ptr::without_provenance_mut(2);
+
+local_pointer! {
+    static CURRENT;
+}
+
+/// Persistent storage for the thread ID.
+///
+/// We store the thread ID so that it never gets destroyed during the lifetime
+/// of a thread, either using `#[thread_local]` or multiple `local_pointer!`s.
+pub(super) mod id {
+    use super::*;
+
+    cfg_select! {
+        target_thread_local => {
+            use crate::cell::Cell;
+
+            #[thread_local]
+            static ID: Cell<Option<ThreadId>> = Cell::new(None);
+
+            pub(super) const CHEAP: bool = true;
+
+            pub(crate) fn get() -> Option<ThreadId> {
+                ID.get()
+            }
+
+            pub(super) fn set(id: ThreadId) {
+                ID.set(Some(id))
+            }
+        }
+        target_pointer_width = "16" => {
+            local_pointer! {
+                static ID0;
+                static ID16;
+                static ID32;
+                static ID48;
+            }
+
+            pub(super) const CHEAP: bool = false;
+
+            pub(crate) fn get() -> Option<ThreadId> {
+                let id0 = ID0.get().addr() as u64;
+                let id16 = ID16.get().addr() as u64;
+                let id32 = ID32.get().addr() as u64;
+                let id48 = ID48.get().addr() as u64;
+                ThreadId::from_u64((id48 << 48) + (id32 << 32) + (id16 << 16) + id0)
+            }
+
+            pub(super) fn set(id: ThreadId) {
+                let val = id.as_u64().get();
+                ID0.set(ptr::without_provenance_mut(val as usize));
+                ID16.set(ptr::without_provenance_mut((val >> 16) as usize));
+                ID32.set(ptr::without_provenance_mut((val >> 32) as usize));
+                ID48.set(ptr::without_provenance_mut((val >> 48) as usize));
+            }
+        }
+        target_pointer_width = "32" => {
+            local_pointer! {
+                static ID0;
+                static ID32;
+            }
+
+            pub(super) const CHEAP: bool = false;
+
+            pub(crate) fn get() -> Option<ThreadId> {
+                let id0 = ID0.get().addr() as u64;
+                let id32 = ID32.get().addr() as u64;
+                ThreadId::from_u64((id32 << 32) + id0)
+            }
+
+            pub(super) fn set(id: ThreadId) {
+                let val = id.as_u64().get();
+                ID0.set(ptr::without_provenance_mut(val as usize));
+                ID32.set(ptr::without_provenance_mut((val >> 32) as usize));
+            }
+        }
+        _ => {
+            local_pointer! {
+                static ID;
+            }
+
+            pub(super) const CHEAP: bool = true;
+
+            pub(crate) fn get() -> Option<ThreadId> {
+                let id = ID.get().addr() as u64;
+                ThreadId::from_u64(id)
+            }
+
+            pub(super) fn set(id: ThreadId) {
+                let val = id.as_u64().get();
+                ID.set(ptr::without_provenance_mut(val as usize));
+            }
+        }
+    }
+
+    #[inline]
+    pub(super) fn get_or_init() -> ThreadId {
+        get().unwrap_or_else(
+            #[cold]
+            || {
+                let id = ThreadId::new();
+                id::set(id);
+                id
+            },
+        )
+    }
+}
+
+/// Tries to set the thread handle for the current thread. Fails if a handle was
+/// already set or if the thread ID of `thread` would change an already-set ID.
+pub(super) fn set_current(thread: Thread) -> Result<(), Thread> {
+    if CURRENT.get() != NONE {
+        return Err(thread);
+    }
+
+    match id::get() {
+        Some(id) if id == thread.id() => {}
+        None => id::set(thread.id()),
+        _ => return Err(thread),
+    }
+
+    // Make sure that `crate::rt::thread_cleanup` will be run, which will
+    // call `drop_current`.
+    crate::sys::thread_local::guard::enable();
+    CURRENT.set(thread.into_raw().cast_mut());
+    Ok(())
+}
+
+/// Gets the unique identifier of the thread which invokes it.
+///
+/// Calling this function may be more efficient than accessing the current
+/// thread id through the current thread handle. i.e. `thread::current().id()`.
+///
+/// This function will always succeed, will always return the same value for
+/// one thread and is guaranteed not to call the global allocator.
+///
+/// # Examples
+///
+/// ```
+/// #![feature(current_thread_id)]
+///
+/// use std::thread;
+///
+/// let other_thread = thread::spawn(|| {
+///     thread::current_id()
+/// });
+///
+/// let other_thread_id = other_thread.join().unwrap();
+/// assert_ne!(thread::current_id(), other_thread_id);
+/// ```
+#[inline]
+#[must_use]
+#[unstable(feature = "current_thread_id", issue = "147194")]
+pub fn current_id() -> ThreadId {
+    // If accessing the persistent thread ID takes multiple TLS accesses, try
+    // to retrieve it from the current thread handle, which will only take one
+    // TLS access.
+    if !id::CHEAP {
+        if let Some(id) = try_with_current(|t| t.map(|t| t.id())) {
+            return id;
+        }
+    }
+
+    id::get_or_init()
+}
+
+/// Gets the OS thread ID of the thread that invokes it, if available. If not, return the Rust
+/// thread ID.
+///
+/// We use a `u64` to all possible platform IDs without excess `cfg`; most use `int`, some use a
+/// pointer, and Apple uses `uint64_t`. This is a "best effort" approach for diagnostics and is
+/// allowed to fall back to a non-OS ID (such as the Rust thread ID) or a non-unique ID (such as a
+/// PID) if the thread ID cannot be retrieved.
+pub(crate) fn current_os_id() -> u64 {
+    imp::current_os_id().unwrap_or_else(|| current_id().as_u64().get())
+}
+
+/// Gets a reference to the handle of the thread that invokes it, if the handle
+/// has been initialized.
+fn try_with_current<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&Thread>) -> R,
+{
+    let current = CURRENT.get();
+    if current > DESTROYED {
+        // SAFETY: `Arc` does not contain interior mutability, so it does not
+        // matter that the address of the handle might be different depending
+        // on where this is called.
+        unsafe {
+            let current = ManuallyDrop::new(Thread::from_raw(current));
+            f(Some(&current))
+        }
+    } else {
+        f(None)
+    }
+}
+
+/// Run a function with the current thread's name.
+///
+/// Modulo thread local accesses, this function is safe to call from signal
+/// handlers and in similar circumstances where allocations are not possible.
+pub(crate) fn with_current_name<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&str>) -> R,
+{
+    try_with_current(|thread| {
+        let name = if let Some(thread) = thread {
+            // If there is a current thread handle, try to use the name stored
+            // there.
+            thread.name()
+        } else if let Some(main) = main_thread::get()
+            && let Some(id) = id::get()
+            && id == main
+        {
+            // The main thread doesn't always have a thread handle, we must
+            // identify it through its ID instead. The checks are ordered so
+            // that the current ID is only loaded if it is actually needed,
+            // since loading it from TLS might need multiple expensive accesses.
+            Some("main")
+        } else {
+            None
+        };
+
+        f(name)
+    })
+}
+
+/// Gets a handle to the thread that invokes it. If the handle stored in thread-
+/// local storage was already destroyed, this creates a new unnamed temporary
+/// handle to allow thread parking in nearly all situations.
+pub(crate) fn current_or_unnamed() -> Thread {
+    let current = CURRENT.get();
+    if current > DESTROYED {
+        unsafe {
+            let current = ManuallyDrop::new(Thread::from_raw(current));
+            (*current).clone()
+        }
+    } else if current == DESTROYED {
+        Thread::
+
+//! Random data generation with the Linux kernel.
+//!
+//! The first interface random data interface to be introduced on Linux were
+//! the `/dev/random` and `/dev/urandom` special files. As paths can become
+//! unreachable when inside a chroot and when the file descriptors are exhausted,
+//! this was not enough to provide userspace with a reliable source of randomness,
+//! so when the OpenBSD 5.6 introduced the `getentropy` syscall, Linux 3.17 got
+//! its very own `getrandom`  syscall to match.[^1] Unfortunately, even if our
+//! minimum supported version were high enough, we still couldn't rely on the
+//! syscall being available, as it is blocked in `seccomp` by default.
+//!
+//! The question is therefore which of the random sources to use. Historically,
+//! the kernel contained two pools: the blocking and non-blocking pool. The
+//! blocking pool used entropy estimation to limit the amount of available
+//! bytes, while the non-blocking pool, once initialized using the blocking
+//! pool, uses a CPRNG to return an unlimited number of random bytes. With a
+//! strong enough CPRNG however, the entropy estimation didn't contribute that
+//! much towards security while being an excellent vector for DoS attacks. Thus,
+//! the blocking pool was removed in kernel version 5.6.[^2] That patch did not
+//! magically increase the quality of the non-blocking pool, however, so we can
+//! safely consider it strong enough even in older kernel versions and use it
+//! unconditionally.
+//!
+//! One additional consideration to make is that the non-blocking pool is not
+//! always initialized during early boot. We want the best quality of randomness
+//! for the output of `DefaultRandomSource` so we simply wait until it is
+//! initialized. When `HashMap` keys however, this represents a potential source
+//! of deadlocks, as the additional entropy may only be generated once the
+//! program makes forward progress. In that case, we just use the best random
+//! data the system has available at the time.
+//!
+//! So in conclusion, we always want the output of the non-blocking pool, but
+//! may need to wait until it is initialized. The default behavior of `getrandom`
+//! is to wait until the non-blocking pool is initialized and then draw from there,
+//! so if `getrandom` is available, we use its default to generate the bytes. For
+//! `HashMap`, however, we need to specify the `GRND_INSECURE` flags, but that
+//! is only available starting with kernel version 5.6. Thus, if we detect that
+//! the flag is unsupported, we try `GRND_NONBLOCK` instead, which will only
+//! succeed if the pool is initialized. If it isn't, we fall back to the file
+//! access method.
+//!
+//! The behavior of `/dev/urandom` is inverse to that of `getrandom`: it always
+//! yields data, even when the pool is not initialized. For generating `HashMap`
+//! keys, this is not important, so we can use it directly. For secure data
+//! however, we need to wait until initialization, which we can do by `poll`ing
+//! `/dev/random`.
+//!
+//! TLDR: our fallback strategies are:
+//!
+//! Secure data                                 | `HashMap` keys
+//! --------------------------------------------|------------------
+//! getrandom(0)                                | getrandom(GRND_INSECURE)
+//! poll("/dev/random") && read("/dev/urandom") | getrandom(GRND_NONBLOCK)
+//!                                             | read("/dev/urandom")
+//!
+//! [^1]: <https://lwn.net/Articles/606141/>
+//! [^2]: <https://lwn.net/Articles/808575/>
+//!
+// FIXME(in 2040 or so): once the minimum kernel version is 5.6, remove the
+// `GRND_NONBLOCK` fallback and use `/dev/random` instead of `/dev/urandom`
+// when secure data is required.
+
+use crate::fs::File;
+use crate::io::Read;
+use crate::os::fd::AsRawFd;
+use crate::sync::OnceLock;
+use crate::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use crate::sync::atomic::{Atomic, AtomicBool};
+use crate::sys::io::errno;
+use crate::sys::pal::weak::syscall;
+
+fn getrandom(mut bytes: &mut [u8], insecure: bool) {
+    // A weak symbol allows interposition, e.g. for perf measurements that want to
+    // disable randomness for consistency. Otherwise, we'll try a raw syscall.
+    // (`getrandom` was added in glibc 2.25, musl 1.1.20, android API level 28)
+    syscall!(
+        fn getrandom(
+            buffer: *mut libc::c_void,
+            length: libc::size_t,
+            flags: libc::c_uint,
+        ) -> libc::ssize_t;
+    );
+
+    static GETRANDOM_AVAILABLE: Atomic<bool> = AtomicBool::new(true);
+    static GRND_INSECURE_AVAILABLE: Atomic<bool> = AtomicBool::new(true);
+    static URANDOM_READY: Atomic<bool> = AtomicBool::new(false);
+    static DEVICE: OnceLock<File> = OnceLock::new();
+
+    if GETRANDOM_AVAILABLE.load(Relaxed) {
+        loop {
+            if bytes.is_empty() {
+                return;
+            }
+
+            let flags = if insecure {
+                if GRND_INSECURE_AVAILABLE.load(Relaxed) {
+                    libc::GRND_INSECURE
+                } else {
+                    libc::GRND_NONBLOCK
+                }
+            } else {
+                0
+            };
+
+            let ret = unsafe { getrandom(bytes.as_mut_ptr().cast(), bytes.len(), flags) };
+            if ret != -1 {
+                bytes = &mut bytes[ret as usize..];
+            } else {
+                match errno() {
+                    libc::EINTR => continue,
+                    // `GRND_INSECURE` is not available, try
+                    // `GRND_NONBLOCK`.
+                    libc::EINVAL if flags == libc::GRND_INSECURE => {
+                        GRND_INSECURE_AVAILABLE.store(false, Relaxed);
+                        continue;
+                    }
+                    // The pool is not initialized yet, fall back to
+                    // /dev/urandom for now.
+                    libc::EAGAIN if flags == libc::GRND_NONBLOCK => break,
+                    // `getrandom` is unavailable or blocked by seccomp.
+                    // Don't try it again and fall back to /dev/urandom.
+                    libc::ENOSYS | libc::EPERM => {
+                        GETRANDOM_AVAILABLE.store(false, Relaxed);
+                        break;
+                    }
+                    _ => panic!("failed to generate random data"),
+                }
+            }
+        }
+    }
+
+    // When we want cryptographic strength, we need to wait for the CPRNG-pool
+    // to become initialized. Do this by polling `/dev/random` until it is ready.
+    if !insecure {
+        if !URANDOM_READY.load(Acquire) {
+            let random = File::open("/dev/random").expect("failed to open /dev/random");
+            let mut fd = libc::pollfd { fd: random.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+
+            while !URANDOM_READY.load(Acquire) {
+                let ret = unsafe { libc::poll(&mut fd, 1, -1) };
+                match ret {
+                    1 => {
+                        assert_eq!(fd.revents, libc::POLLIN);
+                        URANDOM_READY.store(true, Release);
+                        break;
+                    }
+                    -1 if errno() == libc::EINTR => continue,
+                    _ => panic!("poll(\"/dev/random\") failed"),
+                }
+            }
+        }
+    }
+
+    DEVICE
+        .get_or_try_init(|| File::open("/dev/urandom"))
+        .and_then(|mut dev| dev.read_exact(bytes))
+        .expect("failed to generate random data");
+}
+
+pub fn fill_bytes(bytes: &mut [u8]) {
+    getrandom(bytes, false);
+}
+
+pub fn hashmap_random_keys() -> (u64, u64) {
+    let mut bytes = [0; 16];
+    getrandom(&mut bytes, true);
+    let k1 = u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+    let k2 = u64::from_ne_bytes(bytes[8..].try_into().unwrap());
+    (k1, k2)
+}
+
+
+//! Header: `uapi/linux/pidfd.h`
+
+use crate::prelude::*;
+use crate::{
+    Ioctl,
+    _IO,
+    _IOWR,
+};
+
+/* Flags for pidfd_open().  */
+pub const PIDFD_NONBLOCK: c_uint = crate::O_NONBLOCK as c_uint;
+pub const PIDFD_THREAD: c_uint = crate::O_EXCL as c_uint;
+
+/* Flags for pidfd_send_signal(). */
+pub const PIDFD_SIGNAL_THREAD: c_uint = 1 << 0;
+pub const PIDFD_SIGNAL_THREAD_GROUP: c_uint = 1 << 1;
+pub const PIDFD_SIGNAL_PROCESS_GROUP: c_uint = 1 << 2;
+
+/* Flags for pidfd_info. */
+pub const PIDFD_INFO_PID: c_uint = 1 << 0;
+pub const PIDFD_INFO_CREDS: c_uint = 1 << 1;
+pub const PIDFD_INFO_CGROUPID: c_uint = 1 << 2;
+pub const PIDFD_INFO_EXIT: c_uint = 1 << 3;
+
+pub const PIDFD_INFO_SIZE_VER0: c_uint = 64;
+
+s! {
+    #[non_exhaustive]
+    pub struct pidfd_info {
+        pub mask: crate::__u64,
+        pub cgroupid: crate::__u64,
+        pub pid: crate::__u32,
+        pub tgid: crate::__u32,
+        pub ppid: crate::__u32,
+        pub ruid: crate::__u32,
+        pub rgid: crate::__u32,
+        pub euid: crate::__u32,
+        pub egid: crate::__u32,
+        pub suid: crate::__u32,
+        pub sgid: crate::__u32,
+        pub fsuid: crate::__u32,
+        pub fsgid: crate::__u32,
+        pub exit_code: crate::__s32,
+    }
+}
+
+const PIDFS_IOCTL_MAGIC: c_uint = 0xFF;
+
+pub const PIDFD_GET_CGROUP_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 1);
+pub const PIDFD_GET_IPC_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 2);
+pub const PIDFD_GET_MNT_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 3);
+pub const PIDFD_GET_NET_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 4);
+pub const PIDFD_GET_PID_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 5);
+pub const PIDFD_GET_PID_FOR_CHILDREN_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 6);
+pub const PIDFD_GET_TIME_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 7);
+pub const PIDFD_GET_TIME_FOR_CHILDREN_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 8);
+pub const PIDFD_GET_USER_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 9);
+pub const PIDFD_GET_UTS_NAMESPACE: Ioctl = _IO(PIDFS_IOCTL_MAGIC, 10);
+pub const PIDFD_GET_INFO: Ioctl = _IOWR::<pidfd_info>(PIDFS_IOCTL_MAGIC, 11);
+
+
+use core::alloc::{AllocError, Allocator, Layout};
+use core::cell::Cell;
+use core::mem::MaybeUninit;
+use core::ptr::NonNull;
+
+#[test]
+#[expect(dangling_pointers_from_temporaries)]
+fn uninitialized_zero_size_box() {
+    assert_eq!(
+        &*Box::<()>::new_uninit() as *const _,
+        NonNull::<MaybeUninit<()>>::dangling().as_ptr(),
+    );
+    assert_eq!(
+        Box::<[()]>::new_uninit_slice(4).as_ptr(),
+        NonNull::<MaybeUninit<()>>::dangling().as_ptr(),
+    );
+    assert_eq!(
+        Box::<[String]>::new_uninit_slice(0).as_ptr(),
+        NonNull::<MaybeUninit<String>>::dangling().as_ptr(),
+    );
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Dummy {
+    _data: u8,
+}
+
+#[test]
+fn box_clone_and_clone_from_equivalence() {
+    for size in (0..8).map(|i| 2usize.pow(i)) {
+        let control = vec![Dummy { _data: 42 }; size].into_boxed_slice();
+        let clone = control.clone();
+        let mut copy = vec![Dummy { _data: 84 }; size].into_boxed_slice();
+        copy.clone_from(&control);
+        assert_eq!(control, clone);
+        assert_eq!(control, copy);
+    }
+}
+
+/// This test might give a false positive in case the box reallocates,
+/// but the allocator keeps the original pointer.
+///
+/// On the other hand, it won't give a false negative: If it fails, then the
+/// memory was definitely not reused.
+#[test]
+fn box_clone_from_ptr_stability() {
+    for size in (0..8).map(|i| 2usize.pow(i)) {
+        let control = vec![Dummy { _data: 42 }; size].into_boxed_slice();
+        let mut copy = vec![Dummy { _data: 84 }; size].into_boxed_slice();
+        let copy_raw = copy.as_ptr() as usize;
+        copy.clone_from(&control);
+        assert_eq!(copy.as_ptr() as usize, copy_raw);
+    }
+}
+
+#[test]
+fn box_deref_lval() {
+    let x = Box::new(Cell::new(5));
+    x.set(1000);
+    assert_eq!(x.get(), 1000);
+}
+
+/// Test that a panic from a destructor does not leak the allocation.
+#[test]
+#[cfg_attr(not(panic = "unwind"), ignore = "test requires unwinding support")]
+fn panic_no_leak() {
+    use std::alloc::{AllocError, Allocator, Global, Layout};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::ptr::NonNull;
+
+    struct AllocCount(Cell<i32>);
+    unsafe impl Allocator for AllocCount {
+        fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+            self.0.set(self.0.get() + 1);
+            Global.allocate(layout)
+        }
+        unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+            self.0.set(self.0.get() - 1);
+            unsafe { Global.deallocate(ptr, layout) }
+        }
+    }
+
+    struct PanicOnDrop {
+        _data: u8,
+    }
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            panic!("PanicOnDrop");
+        }
+    }
+
+    let alloc = AllocCount(Cell::new(0));
+    let b = Box::new_in(PanicOnDrop { _data: 42 }, &alloc);
+    assert_eq!(alloc.0.get(), 1);
+
+    let panic_message = catch_unwind(AssertUnwindSafe(|| drop(b))).unwrap_err();
+    assert_eq!(*panic_message.downcast_ref::<&'static str>().unwrap(), "PanicOnDrop");
+    assert_eq!(alloc.0.get(), 0);
+}
+
+#[allow(unused)]
+pub struct ConstAllocator;
+
+unsafe impl Allocator for ConstAllocator {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        match layout.size() {
+            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling_ptr(), 0)),
+            _ => unsafe {
+                let ptr = core::intrinsics::const_allocate(layout.size(), layout.align());
+                Ok(NonNull::new_unchecked(ptr as *mut [u8; 0] as *mut [u8]))
+            },
+        }
+    }
+
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, layout: Layout) {
+        match layout.size() {
+            0 => { /* do nothing */ }
+            _ => { /* do nothing too */ }
+        }
+    }
+
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let ptr = self.allocate(layout)?;
+        if layout.size() > 0 {
+            unsafe {
+                ptr.as_mut_ptr().write_bytes(0, layout.size());
+            }
+        }
+        Ok(ptr)
+    }
+
+    unsafe fn grow(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        debug_assert!(
+            new_layout.size() >= old_layout.size(),
+            "`new_layout.size()` must be greater than or equal to `old_layout.size()`"
+        );
+
+        let new_ptr = self.allocate(new_layout)?;
+        if new_layout.size() > 0 {
+            // Safety: `new_ptr` is valid for writes and `ptr` for reads of
+            // `old_layout.size()`, because `new_layout.size() >=
+            // old_layout.size()` (which is an invariant that must be upheld by
+            // callers).
+            unsafe {
+                new_ptr.as_mut_ptr().copy_from_nonoverlapping(ptr.as_ptr(), old_layout.size());
+            }
+            // Safety: `ptr` is never used again is also an invariant which must
+            // be upheld by callers.
+            unsafe {
+                self.deallocate(ptr, old_layout);
+            }
+        }
+        Ok(new_ptr)
+    }
+
+    unsafe fn grow_zeroed(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        // Safety: Invariants of `grow_zeroed` and `grow` are the same, and must
+        // be enforced by callers.
+        let new_ptr = unsafe { self.grow(ptr, old_layout, new_layout)? };
+        if new_layout.size() > 0 {
+            let old_size = old_layout.size();
+            let new_size = new_layout.size();
+            let raw_ptr = new_ptr.as_mut_ptr();
+            // Safety:
+            // - `grow` returned Ok, so the returned pointer must be valid for
+            //   `new_size` bytes
+            // - `new_size` must be larger than `old_size`, which is an
+            //   invariant which must be upheld by callers.
+            unsafe {
+                raw_ptr.add(old_size).write_bytes(0, new_size - old_size);
+            }
+        }
+        Ok(new_ptr)
+    }
+
+    unsafe fn shrink(
+        &self,
+        ptr: NonNull<u8>,
+        old_layout: Layout,
+        new_layout: Layout,
+    ) -> Result<NonNull<[u8]>, AllocError> {
+        debug_assert!(
+            new_layout.size() <= old_layout.size(),
+            "`new_layout.size()` must be smaller than or equal to `old_layout.size()`"
+        );
+
+        let new_ptr = self.allocate(new_layout)?;
+        if new_layout.size() > 0 {
+            // Safety: `new_ptr` and `ptr` are valid for reads/writes of
+            // `new_layout.size()` because of the invariants of shrink, which
+            // include `new_layout.size()` being smaller than (or equal to)
+            // `old_layout.size()`.
+            unsafe {
+                new_ptr.as_mut_ptr().copy_from_nonoverlapping(ptr.as_ptr(), new_layout.size());
+            }
+            // Safety: `ptr` is never used again is also an invariant which must
+            // be upheld by callers.
+            unsafe {
+                self.deallocate(ptr, old_layout);
+            }
+        }
+        Ok(new_ptr)
+    }
+
+    fn by_ref(&self) -> &Self
+    where
+        Self: Sized,
+    {
+        self
+    }
+}
+
+#[allow(unused)]
+mod pin_coerce_unsized {
+    use alloc::boxed::Box;
+    use core::pin::Pin;
+
+    trait MyTrait {
+        fn action(&self) -> &str;
+    }
+    impl MyTrait for String {
+        fn action(&self) -> &str {
+            &*self
+        }
+    }
+    struct MyStruct;
+    impl MyTrait for MyStruct {
+        fn action(&self) -> &str {
+            "MyStruct"
+        }
+    }
+
+    // Pin coercion should work for Box
+    fn pin_box<T: MyTrait + 'static>(arg: Pin<Box<T>>) -> Pin<Box<dyn MyTrait>> {
+        arg
+    }
+
+    #[test]
+    fn pin_coerce_unsized_box() {
+        let my_string = "my string";
+        let a_string = Box::pin(String::from(my_string));
+        let pin_box_str = pin_box(a_string);
+        assert_eq!(pin_box_str.as_ref().action(), my_string);
+        let a_struct 
+
+//! Apple-specific raw type definitions
+use crate::os::raw::c_long;
+
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type blkcnt_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type blksize_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type dev_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type ino_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type mode_t = u32;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type nlink_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type off_t = u64;
+#[stable(feature = "raw_ext", since = "1.1.0")]
+pub type time_t = i64;
+
+#[stable(feature = "pthread_t", since = "1.8.0")]
+pub type pthread_t = usize;
+
+#[repr(C)]
+#[derive(Clone)]
+#[stable(feature = "raw_ext", since = "1.1.0")]
+#[allow(dead_code)]
+pub struct stat {
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_dev: i32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_mode: u16,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_nlink: u16,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_ino: u64,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_uid: u32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_gid: u32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_rdev: i32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_atime: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_atime_nsec: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_mtime: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_mtime_nsec: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_ctime: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_ctime_nsec: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_birthtime: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_birthtime_nsec: c_long,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_size: i64,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_blocks: i64,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_blksize: i32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_flags: u32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_gen: u32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_lspare: i32,
+    #[stable(feature = "raw_ext", since = "1.1.0")]
+    pub st_qspare: [i64; 2],
+}
+
+
+use core::iter;
+
+use super::*;
+
+#[test]
+fn test_iterator_array_chunks_infer() {
+    let xs = [1, 1, 2, -2, 6, 0, 3, 1];
+    for [a, b, c] in xs.iter().copied().array_chunks() {
+        assert_eq!(a + b + c, 4);
+    }
+}
+
+#[test]
+fn test_iterator_array_chunks_clone_and_drop() {
+    let count = Cell::new(0);
+    let mut it = (0..5).map(|_| CountDrop::new(&count)).array_chunks::<3>();
+    assert_eq!(it.by_ref().count(), 1);
+    assert_eq!(count.get(), 3);
+    let mut it2 = it.clone();
+    assert_eq!(count.get(), 3);
+    assert_eq!(it.into_remainder().len(), 2);
+    assert_eq!(count.get(), 5);
+    assert!(it2.next().is_none());
+    assert_eq!(it2.into_remainder().len(), 2);
+    assert_eq!(count.get(), 7);
+}
+
+#[test]
+fn test_iterator_array_chunks_remainder() {
+    let mut it = (0..11).array_chunks::<4>();
+    assert_eq!(it.next(), Some([0, 1, 2, 3]));
+    assert_eq!(it.next(), Some([4, 5, 6, 7]));
+    assert_eq!(it.next(), None);
+    assert_eq!(it.into_remainder().as_slice(), &[8, 9, 10]);
+}
+
+#[test]
+fn test_iterator_array_chunks_size_hint() {
+    let it = (0..6).array_chunks::<1>();
+    assert_eq!(it.size_hint(), (6, Some(6)));
+
+    let it = (0..6).array_chunks::<3>();
+    assert_eq!(it.size_hint(), (2, Some(2)));
+
+    let it = (0..6).array_chunks::<5>();
+    assert_eq!(it.size_hint(), (1, Some(1)));
+
+    let it = (0..6).array_chunks::<7>();
+    assert_eq!(it.size_hint(), (0, Some(0)));
+
+    let it = (1..).array_chunks::<2>();
+    assert_eq!(it.size_hint(), (usize::MAX / 2, None));
+
+    let it = (1..).filter(|x| x % 2 != 0).array_chunks::<2>();
+    assert_eq!(it.size_hint(), (0, None));
+}
+
+#[test]
+fn test_iterator_array_chunks_count() {
+    let it = (0..6).array_chunks::<1>();
+    assert_eq!(it.count(), 6);
+
+    let it = (0..6).array_chunks::<3>();
+    assert_eq!(it.count(), 2);
+
+    let it = (0..6).array_chunks::<5>();
+    assert_eq!(it.count(), 1);
+
+    let it = (0..6).array_chunks::<7>();
+    assert_eq!(it.count(), 0);
+
+    let it = (0..6).filter(|x| x % 2 == 0).array_chunks::<2>();
+    assert_eq!(it.count(), 1);
+
+    let it = iter::empty::<i32>().array_chunks::<2>();
+    assert_eq!(it.count(), 0);
+
+    let it = [(); usize::MAX].iter().array_chunks::<2>();
+    assert_eq!(it.count(), usize::MAX / 2);
+}
+
+#[test]
+fn test_iterator_array_chunks_next_and_next_back() {
+    let mut it = (0..11).array_chunks::<3>();
+    assert_eq!(it.next(), Some([0, 1, 2]));
+    assert_eq!(it.next_back(), Some([6, 7, 8]));
+    assert_eq!(it.next(), Some([3, 4, 5]));
+    assert_eq!(it.next_back(), None);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.next_back(), None);
+    assert_eq!(it.next(), None);
+    assert_eq!(it.into_remainder().as_slice(), &[9, 10]);
+}
+
+#[test]
+fn test_iterator_array_chunks_rev_remainder() {
+    let mut it = (0..11).array_chunks::<4>();
+    {
+        let mut it = it.by_ref().rev();
+        assert_eq!(it.next(), Some([4, 5, 6, 7]));
+        assert_eq!(it.next(), Some([0, 1, 2, 3]));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None);
+    }
+    assert_eq!(it.into_remainder().as_slice(), &[8, 9, 10]);
+}
+
+#[test]
+fn test_iterator_array_chunks_try_fold() {
+    let count = Cell::new(0);
+    let mut it = (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>();
+    let result: Result<_, ()> = it.by_ref().try_fold(0, |acc, _item| Ok(acc + 1));
+    assert_eq!(result, Ok(3));
+    assert_eq!(count.get(), 9);
+    drop(it);
+    assert_eq!(count.get(), 10);
+
+    let count = Cell::new(0);
+    let mut it = (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>();
+    let result = it.by_ref().try_fold(0, |acc, _item| if acc < 2 { Ok(acc + 1) } else { Err(acc) });
+    assert_eq!(result, Err(2));
+    assert_eq!(count.get(), 9);
+    drop(it);
+    assert_eq!(count.get(), 9);
+}
+
+#[test]
+fn test_iterator_array_chunks_fold() {
+    let result = (1..11).array_chunks::<3>().fold(0, |acc, [a, b, c]| {
+        assert_eq!(acc + 1, a);
+        assert_eq!(acc + 2, b);
+        assert_eq!(acc + 3, c);
+        acc + 3
+    });
+    assert_eq!(result, 9);
+
+    let count = Cell::new(0);
+    let result =
+        (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>().fold(0, |acc, _item| acc + 1);
+    assert_eq!(result, 3);
+    // fold impls may or may not process the remainder
+    assert!(count.get() <= 10 && count.get() >= 9);
+}
+
+#[test]
+fn test_iterator_array_chunks_try_rfold() {
+    let count = Cell::new(0);
+    let mut it = (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>();
+    let result: Result<_, ()> = it.try_rfold(0, |acc, _item| Ok(acc + 1));
+    assert_eq!(result, Ok(3));
+    assert_eq!(count.get(), 9);
+    drop(it);
+    assert_eq!(count.get(), 10);
+
+    let count = Cell::new(0);
+    let mut it = (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>();
+    let result = it.try_rfold(0, |acc, _item| if acc < 2 { Ok(acc + 1) } else { Err(acc) });
+    assert_eq!(result, Err(2));
+    assert_eq!(count.get(), 9);
+    drop(it);
+    assert_eq!(count.get(), 10);
+}
+
+#[test]
+fn test_iterator_array_chunks_rfold() {
+    let result = (1..11).array_chunks::<3>().rfold(0, |acc, [a, b, c]| {
+        assert_eq!(10 - (acc + 1), c);
+        assert_eq!(10 - (acc + 2), b);
+        assert_eq!(10 - (acc + 3), a);
+        acc + 3
+    });
+    assert_eq!(result, 9);
+
+    let count = Cell::new(0);
+    let result =
+        (0..10).map(|_| CountDrop::new(&count)).array_chunks::<3>().rfold(0, |acc, _item| acc + 1);
+    assert_eq!(result, 3);
+    assert_eq!(count.get(), 10);
+}
+
+
+use super::generic;
+
+/// Floor (f16)
+///
+/// Finds the nearest integer less than or equal to `x`.
+#[cfg(f16_enabled)]
+#[cfg_attr(assert_no_panic, no_panic::no_panic)]
+pub fn floorf16(x: f16) -> f16 {
+    return generic::floor_status(x).val;
+}
+
+/// Floor (f64)
+///
+/// Finds the nearest integer less than or equal to `x`.
+#[cfg_attr(assert_no_panic, no_panic::no_panic)]
+pub fn floor(x: f64) -> f64 {
+    select_implementation! {
+        name: floor,
+        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        use_arch_required: x86_no_sse2,
+        args: x,
+    }
+
+    return generic::floor_status(x).val;
+}
+
+/// Floor (f32)
+///
+/// Finds the nearest integer less than or equal to `x`.
+#[cfg_attr(assert_no_panic, no_panic::no_panic)]
+pub fn floorf(x: f32) -> f32 {
+    select_implementation! {
+        name: floorf,
+        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        args: x,
+    }
+
+    return generic::floor_status(x).val;
+}
+
+/// Floor (f128)
+///
+/// Finds the nearest integer less than or equal to `x`.
+#[cfg(f128_enabled)]
+#[cfg_attr(assert_no_panic, no_panic::no_panic)]
+pub fn floorf128(x: f128) -> f128 {
+    return generic::floor_status(x).val;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::{Float, FpResult, Hex, Status};
+
+    macro_rules! cases {
+        ($f:ty) => {
+            [
+                // roundtrip
+                (0.0, 0.0, Status::OK),
+                (-0.0, -0.0, Status::OK),
+                (1.0, 1.0, Status::OK),
+                (-1.0, -1.0, Status::OK),
+                (<$f>::INFINITY, <$f>::INFINITY, Status::OK),
+                (<$f>::NEG_INFINITY, <$f>::NEG_INFINITY, Status::OK),
+                // with rounding
+                (0.1, 0.0, Status::INEXACT),
+                (-0.1, -1.0, Status::INEXACT),
+                (0.5, 0.0, Status::INEXACT),
+                (-0.5, -1.0, Status::INEXACT),
+                (0.9, 0.0, Status::INEXACT),
+                (-0.9, -1.0, Status::INEXACT),
+                (1.1, 1.0, Status::INEXACT),
+                (-1.1, -2.0, Status::INEXACT),
+                (1.5, 1.0, Status::INEXACT),
+                (-1.5, -2.0, Status::INEXACT),
+                (1.9, 1.0, Status::INEXACT),
+                (-1.9, -2.0, Status::INEXACT),
+            ]
+        };
+    }
+
+    #[track_caller]
+    fn check<F: Float>(f: fn(F) -> F, cases: &[(F, F, Status)]) {
+        for &(x, exp_res, exp_stat) in cases {
+            let FpResult { val, status } = generic::floor_status(x);
+            assert_biteq!(val, exp_res, "generic::floor_status({x:?}) ({})", Hex(x));
+            assert_eq!(
+                status,
+                exp_stat,
+                "{x:?} {} -> {exp_res:?} {}",
+                Hex(x),
+                Hex(exp_res)
+            );
+            let val = f(x);
+            assert_biteq!(val, exp_res, "floor({x:?}) ({})", Hex(x));
+        }
+    }
+
+    #[test]
+    #[cfg(f16_enabled)]
+    fn check_f16() {
+        check::<f16>(floorf16, &cases!(f16));
+        check::<f16>(
+            floorf16,
+            &[
+                (hf16!("0x1p10"), hf16!("0x1p10"), Status::OK),
+                (hf16!("-0x1p10"), hf16!("-0x1p10"), Status::OK),
+            ],
+        );
+    }
+
+    #[test]
+    fn check_f32() {
+        check::<f32>(floorf, &cases!(f32));
+        check::<f32>(
+            floorf,
+            &[
+                (hf32!("0x1p23"), hf32!("0x1p23"), Status::OK),
+                (hf32!("-0x1p23"), hf32!("-0x1p23"), Status::OK),
+            ],
+        );
+    }
+
+    #[test]
+    fn check_f64() {
+        check::<f64>(floor, &cases!(f64));
+        check::<f64>(
+            floor,
+            &[
+                (hf64!("0x1p52"), hf64!("0x1p52"), Status::OK),
+                (hf64!("-0x1p52"), hf64!("-0x1p52"), Status::OK),
+            ],
+        );
+    }
+
+    #[test]
+    #[cfg(f128_enabled)]
+    fn check_f128() {
+        check::<f128>(floorf128, &cases!(f128));
+        check::<f128>(
+            floorf128,
+            &[
+                (hf128!("0x1p112"), hf128!("0x1p112"), Status::OK),
+                (hf128!("-0x1p112"), hf128!("-0x1p112"), Status::OK),
+            ],
+        );
+    }
+}
+
+
+#![allow(overflowing_literals)]
+
+mod decimal;
+mod decimal_seq;
+mod float;
+mod lemire;
+mod parse;
+
+// Take a float literal, turn it into a string in various ways (that are all trusted
+// to be correct) and see if those strings are parsed back to the value of the literal.
+// Requires a *polymorphic literal*, i.e., one that can serve as f64 as well as f32.
+macro_rules! test_literal {
+    ($x: expr) => {{
+        #[cfg(target_has_reliable_f16)]
+        let x16: f16 = $x;
+        let x32: f32 = $x;
+        let x64: f64 = $x;
+        let inputs = &[stringify!($x).into(), format!("{:?}", x64), format!("{:e}", x64)];
+
+        for input in inputs {
+            assert_eq!(input.parse(), Ok(x64), "failed f64 {input}");
+            assert_eq!(input.parse(), Ok(x32), "failed f32 {input}");
+            #[cfg(target_has_reliable_f16)]
+            assert_eq!(input.parse(), Ok(x16), "failed f16 {input}");
+
+            let neg_input = format!("-{input}");
+            assert_eq!(neg_input.parse(), Ok(-x64), "failed f64 {neg_input}");
+            assert_eq!(neg_input.parse(), Ok(-x32), "failed f32 {neg_input}");
+            #[cfg(target_has_reliable_f16)]
+            assert_eq!(neg_input.parse(), Ok(-x16), "failed f16 {neg_input}");
+        }
+    }};
+}
+
+#[test]
+fn ordinary() {
+    test_literal!(1.0);
+    test_literal!(3e-5);
+    test_literal!(0.1);
+    test_literal!(12345.);
+    test_literal!(0.9999999);
+    test_literal!(2.2250738585072014e-308);
+}
+
+#[test]
+fn special_code_paths() {
+    test_literal!(36893488147419103229.0); // 2^65 - 3, triggers half-to-even with even significand
+    test_literal!(101e-33); // Triggers the tricky underflow case in AlgorithmM (for f32)
+    test_literal!(1e23); // Triggers AlgorithmR
+    test_literal!(2075e23); // Triggers another path through AlgorithmR
+    test_literal!(8713e-23); // ... and yet another.
+}
+
+#[test]
+fn large() {
+    test_literal!(1e300);
+    test_literal!(123456789.34567e250);
+    test_literal!(943794359898089732078308743689303290943794359843568973207830874368930329.);
+}
+
+#[test]
+fn subnormals() {
+    test_literal!(5e-324);
+    test_literal!(91e-324);
+    test_literal!(1e-322);
+    test_literal!(13245643e-320);
+    test_literal!(2.22507385851e-308);
+    test_literal!(2.1e-308);
+    test_literal!(4.9406564584124654e-324);
+}
+
+#[test]
+fn infinity() {
+    test_literal!(1e400);
+    test_literal!(1e309);
+    test_literal!(2e308);
+    test_literal!(1.7976931348624e308);
+}
+
+#[test]
+fn zero() {
+    test_literal!(0.0);
+    test_literal!(1e-325);
+    test_literal!(1e-326);
+    test_literal!(1e-500);
+}
+
+#[test]
+fn fast_path_correct() {
+    // This number triggers the fast path and is handled incorrectly when compiling on
+    // x86 without SSE2 (i.e., using the x87 FPU stack).
+    test_literal!(1.448997445238699);
+}
+
+#[test]
+fn lonely_dot() {
+    #[cfg(target_has_reliable_f16)]
+    assert!(".".parse::<f16>().is_err());
+    assert!(".".parse::<f32>().is_err());
+    assert!(".".parse::<f64>().is_err());
+}
+
+#[test]
+fn exponentiated_dot() {
+    #[cfg(target_has_reliable_f16)]
+    assert!(".e0".parse::<f16>().is_err());
+    assert!(".e0".parse::<f32>().is_err());
+    assert!(".e0".parse::<f64>().is_err());
+}
+
+#[test]
+fn lonely_sign() {
+    #[cfg(target_has_reliable_f16)]
+    assert!("+".parse::<f16>().is_err());
+    assert!("-".parse::<f32>().is_err());
+    assert!("+".parse::<f64>().is_err());
+}
+
+#[test]
+fn whitespace() {
+    #[cfg(target_has_reliable_f16)]
+    assert!("1.0 ".parse::<f16>().is_err());
+    assert!(" 1.0".parse::<f32>().is_err());
+    assert!("1.0 ".parse::<f64>().is_err());
+}
+
+#[test]
+fn nan() {
+    #[cfg(target_has_reliable_f16)]
+    {
+        assert!("NaN".parse::<f16>().unwrap().is_nan());
+        assert!("-NaN".parse::<f16>().unwrap().is_nan());
+    }
+
+    assert!("NaN".parse::<f32>().unwrap().is_nan());
+    assert!("-NaN".parse::<f32>().unwrap().is_nan());
+
+    assert!("NaN".parse::<f64>().unwrap().is_nan());
+    assert!("-NaN".parse::<f64>().unwrap().is_nan());
+}
+
+#[test]
+fn inf() {
+    #[cfg(target_has_reliable_f16)]
+    {
+        assert_eq!("inf".parse(), Ok(f16::INFINITY));
+        assert_eq!("-inf".parse(), Ok(f16::NEG_INFINITY));
+    }
+
+    assert_eq!("inf".parse(), Ok(f32::INFINITY));
+    assert_eq!("-inf".parse(), Ok(f32::NEG_INFINITY));
+
+    assert_eq!("inf".parse(), Ok(f64::INFINITY));
+    assert_eq!("-inf".parse(), Ok(f64::NEG_INFINITY));
+}
+
+#[test]
+fn massive_exponent() {
+    #[cfg(target_has_reliable_f16)]
+    {
+        let max = i16::MAX;
+        assert_eq!(format!("1e{max}000").parse(), Ok(f16::INFINITY));
+        assert_eq!(format!("1e-{max}000").parse(), Ok(0.0f16));
+        assert_eq!(format!("1e{max}000").parse(), Ok(f16::INFINITY));
+    }
+
+    let max = i32::MAX;
+    assert_eq!(format!("1e{max}000").parse(), Ok(f32::INFINITY));
+    assert_eq!(format!("1e-{max}000").parse(), Ok(0.0f32));
+    assert_eq!(format!("1e{max}000").parse(), Ok(f32::INFINITY));
+
+    let max = i64::MAX;
+    assert_eq!(format!("1e{max}000").parse(), Ok(f64::INFINITY));
+    assert_eq!(format!("1e-{max}000").parse(), Ok(0.0f64));
+    assert_eq!(format!("1e{max}000").parse(), Ok(f64::INFINITY));
+}
+
+
+use crate::iter::{FusedIterator, TrustedLen};
+use crate::num::NonZero;
+use crate::ops::{NeverShortCircuit, Try};
+use crate::ub_checks;
+
+/// Like a `Range<usize>`, but with a safety invariant that `start <= end`.
+///
+/// This means that `end - start` cannot overflow, allowing some μoptimizations.
+///
+/// (Normal `Range` code needs to handle degenerate ranges like `10..0`,
+///  which takes extra checks compared to only handling the canonical form.)
+#[derive(Debug)]
+#[derive_const(Clone, Eq, PartialEq)]
+pub(crate) struct IndexRange {
+    start: usize,
+    end: usize,
+}
+
+impl IndexRange {
+    /// # Safety
+    /// - `start <= end`
+    #[inline]
+    #[track_caller]
+    pub(crate) const unsafe fn new_unchecked(start: usize, end: usize) -> Self {
+        ub_checks::assert_unsafe_precondition!(
+            check_library_ub,
+            "IndexRange::new_unchecked requires `start <= end`",
+            (start: usize = start, end: usize = end) => start <= end,
+        );
+        IndexRange { start, end }
+    }
+
+    #[inline]
+    pub(crate) const fn zero_to(end: usize) -> Self {
+        IndexRange { start: 0, end }
+    }
+
+    #[inline]
+    pub(crate) const fn start(&self) -> usize {
+        self.start
+    }
+
+    #[inline]
+    pub(crate) const fn end(&self) -> usize {
+        self.end
+    }
+
+    #[inline]
+    pub(crate) const fn len(&self) -> usize {
+        // SAFETY: By invariant, this cannot wrap
+        // Using the intrinsic because a UB check here impedes LLVM optimization. (#131563)
+        unsafe { crate::intrinsics::unchecked_sub(self.end, self.start) }
+    }
+
+    /// # Safety
+    /// - Can only be called when `start < end`, aka when `len > 0`.
+    #[inline]
+    const unsafe fn next_unchecked(&mut self) -> usize {
+        debug_assert!(self.start < self.end);
+
+        let value = self.start;
+        // SAFETY: The range isn't empty, so this cannot overflow
+        self.start = unsafe { value.unchecked_add(1) };
+        value
+    }
+
+    /// # Safety
+    /// - Can only be called when `start < end`, aka when `len > 0`.
+    #[inline]
+    const unsafe fn next_back_unchecked(&mut self) -> usize {
+        debug_assert!(self.start < self.end);
+
+        // SAFETY: The range isn't empty, so this cannot overflow
+        let value = unsafe { self.end.unchecked_sub(1) };
+        self.end = value;
+        value
+    }
+
+    /// Removes the first `n` items from this range, returning them as an `IndexRange`.
+    /// If there are fewer than `n`, then the whole range is returned and
+    /// `self` is left empty.
+    ///
+    /// This is designed to help implement `Iterator::advance_by`.
+    #[inline]
+    pub(crate) fn take_prefix(&mut self, n: usize) -> Self {
+        let mid = if n <= self.len() {
+            // SAFETY: We just checked that this will be between start and end,
+            // and thus the addition cannot overflow.
+            // Using the intrinsic avoids a superfluous UB check.
+            unsafe { crate::intrinsics::unchecked_add(self.start, n) }
+        } else {
+            self.end
+        };
+        let prefix = Self { start: self.start, end: mid };
+        self.start = mid;
+        prefix
+    }
+
+    /// Removes the last `n` items from this range, returning them as an `IndexRange`.
+    /// If there are fewer than `n`, then the whole range is returned and
+    /// `self` is left empty.
+    ///
+    /// This is designed to help implement `Iterator::advance_back_by`.
+    #[inline]
+    pub(crate) fn take_suffix(&mut self, n: usize) -> Self {
+        let mid = if n <= self.len() {
+            // SAFETY: We just checked that this will be between start and end,
+            // and thus the subtraction cannot overflow.
+            // Using the intrinsic avoids a superfluous UB check.
+            unsafe { crate::intrinsics::unchecked_sub(self.end, n) }
+        } else {
+            self.start
+        };
+        let suffix = Self { start: mid, end: self.end };
+        self.end = mid;
+        suffix
+    }
+
+    #[inline]
+    const fn assume_range(&self) {
+        // SAFETY: This is the type invariant
+        unsafe { crate::hint::assert_unchecked(self.start <= self.end) }
+    }
+}
+
+impl Iterator for IndexRange {
+    type Item = usize;
+
+    #[inline]
+    fn next(&mut self) -> Option<usize> {
+        if self.len() > 0 {
+            // SAFETY: We just checked that the range is non-empty
+            unsafe { Some(self.next_unchecked()) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+
+    #[inline]
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
+        let taken = self.take_prefix(n);
+        NonZero::new(n - taken.len()).map_or(Ok(()), Err)
+    }
+
+    #[inline]
+    fn fold<B, F: FnMut(B, usize) -> B>(mut self, init: B, f: F) -> B {
+        self.try_fold(init, NeverShortCircuit::wrap_mut_2(f)).0
+    }
+
+    #[inline]
+    fn try_fold<B, F, R>(&mut self, mut accum: B, mut f: F) -> R
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        // `Range` needs to check `start < end`, but thanks to our type invariant
+        // we can loop on the stricter `start != end`.
+
+        self.assume_range();
+        while self.start != self.end {
+            // SAFETY: We just checked that the range is non-empty
+            let i = unsafe { self.next_unchecked() };
+            accum = f(accum, i)?;
+        }
+        try { accum }
+    }
+}
+
+impl DoubleEndedIterator for IndexRange {
+    #[inline]
+    fn next_back(&mut self) -> Option<usize> {
+        if self.len() > 0 {
+            // SAFETY: We just checked that the range is non-empty
+            unsafe { Some(self.next_back_unchecked()) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZero<usize>> {
+        let taken = self.take_suffix(n);
+        NonZero::new(n - taken.len()).map_or(Ok(()), Err)
+    }
+
+    #[inline]
+    fn rfold<B, F: FnMut(B, usize) -> B>(mut self, init: B, f: F) -> B {
+        self.try_rfold(init, NeverShortCircuit::wrap_mut_2(f)).0
+    }
+
+    #[inline]
+    fn try_rfold<B, F, R>(&mut self, mut accum: B, mut f: F) -> R
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> R,
+        R: Try<Output = B>,
+    {
+        // `Range` needs to check `start < end`, but thanks to our type invariant
+        // we can loop on the stricter `start != end`.
+
+        self.assume_range();
+        while self.start != self.end {
+            // SAFETY: We just checked that the range is non-empty
+            let i = unsafe { self.next_back_unchecked() };
+            accum = f(accum, i)?;
+        }
+        try { accum }
+    }
+}
+
+impl ExactSizeIterator for IndexRange {
+    #[inline]
+    fn len(&self) -> usize {
+        self.len()
+    }
+}
+
+// SAFETY: Because we only deal in `usize`, our `len` is always perfect.
+unsafe impl TrustedLen for IndexRange {}
+
+impl FusedIterator for IndexRange {}
+
+
+use crate::io::prelude::*;
+use crate::io::{Cursor, IoSlice, IoSliceMut, SeekFrom};
+
+#[test]
+fn test_vec_writer() {
+    let mut writer = Vec::new();
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.write(&[1, 2, 3]).unwrap(), 3);
+    assert_eq!(writer.write(&[4, 5, 6, 7]).unwrap(), 4);
+    assert_eq!(
+        writer
+            .write_vectored(&[IoSlice::new(&[]), IoSlice::new(&[8, 9]), IoSlice::new(&[10])],)
+            .unwrap(),
+        3
+    );
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(writer, b);
+}
+
+#[test]
+fn test_mem_writer() {
+    let mut writer = Cursor::new(Vec::new());
+    writer.set_position(10);
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.write(&[1, 2, 3]).unwrap(), 3);
+    assert_eq!(writer.write(&[4, 5, 6, 7]).unwrap(), 4);
+    assert_eq!(
+        writer
+            .write_vectored(&[IoSlice::new(&[]), IoSlice::new(&[8, 9]), IoSlice::new(&[10])],)
+            .unwrap(),
+        3
+    );
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(&writer.get_ref()[..10], &[0; 10]);
+    assert_eq!(&writer.get_ref()[10..], b);
+}
+
+#[test]
+fn test_mem_writer_preallocated() {
+    let mut writer = Cursor::new(vec![0, 0, 0, 0, 0, 0, 0, 0, 8, 9, 10]);
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.write(&[1, 2, 3]).unwrap(), 3);
+    assert_eq!(writer.write(&[4, 5, 6, 7]).unwrap(), 4);
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(&writer.get_ref()[..], b);
+}
+
+#[test]
+fn test_mem_mut_writer() {
+    let mut vec = Vec::new();
+    let mut writer = Cursor::new(&mut vec);
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.write(&[1, 2, 3]).unwrap(), 3);
+    assert_eq!(writer.write(&[4, 5, 6, 7]).unwrap(), 4);
+    assert_eq!(
+        writer
+            .write_vectored(&[IoSlice::new(&[]), IoSlice::new(&[8, 9]), IoSlice::new(&[10])],)
+            .unwrap(),
+        3
+    );
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assert_eq!(&writer.get_ref()[..], b);
+}
+
+fn test_slice_writer<T>(writer: &mut Cursor<T>)
+where
+    T: AsRef<[u8]>,
+    Cursor<T>: Write,
+{
+    assert_eq!(writer.position(), 0);
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.position(), 1);
+    assert_eq!(writer.write(&[1, 2, 3]).unwrap(), 3);
+    assert_eq!(writer.write(&[4, 5, 6, 7]).unwrap(), 4);
+    assert_eq!(writer.position(), 8);
+    assert_eq!(writer.write(&[]).unwrap(), 0);
+    assert_eq!(writer.position(), 8);
+
+    assert_eq!(writer.write(&[8, 9]).unwrap(), 1);
+    assert_eq!(writer.write(&[10]).unwrap(), 0);
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(writer.get_ref().as_ref(), b);
+}
+
+fn test_slice_writer_vectored<T>(writer: &mut Cursor<T>)
+where
+    T: AsRef<[u8]>,
+    Cursor<T>: Write,
+{
+    assert_eq!(writer.position(), 0);
+    assert_eq!(writer.write_vectored(&[IoSlice::new(&[0])]).unwrap(), 1);
+    assert_eq!(writer.position(), 1);
+    assert_eq!(
+        writer.write_vectored(&[IoSlice::new(&[1, 2, 3]), IoSlice::new(&[4, 5, 6, 7]),]).unwrap(),
+        7,
+    );
+    assert_eq!(writer.position(), 8);
+    assert_eq!(writer.write_vectored(&[]).unwrap(), 0);
+    assert_eq!(writer.position(), 8);
+
+    assert_eq!(writer.write_vectored(&[IoSlice::new(&[8, 9])]).unwrap(), 1);
+    assert_eq!(writer.write_vectored(&[IoSlice::new(&[10])]).unwrap(), 0);
+    let b: &[_] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+    assert_eq!(writer.get_ref().as_ref(), b);
+}
+
+#[test]
+fn test_box_slice_writer() {
+    let mut writer = Cursor::new(vec![0u8; 9].into_boxed_slice());
+    test_slice_writer(&mut writer);
+}
+
+#[test]
+fn test_box_slice_writer_vectored() {
+    let mut writer = Cursor::new(vec![0u8; 9].into_boxed_slice());
+    test_slice_writer_vectored(&mut writer);
+}
+
+#[test]
+fn test_array_writer() {
+    let mut writer = Cursor::new([0u8; 9]);
+    test_slice_writer(&mut writer);
+}
+
+#[test]
+fn test_array_writer_vectored() {
+    let mut writer = Cursor::new([0u8; 9]);
+    test_slice_writer_vectored(&mut writer);
+}
+
+#[test]
+fn test_buf_writer() {
+    let mut buf = [0 as u8; 9];
+    let mut writer = Cursor::new(&mut buf[..]);
+    test_slice_writer(&mut writer);
+}
+
+#[test]
+fn test_buf_writer_vectored() {
+    let mut buf = [0 as u8; 9];
+    let mut writer = Cursor::new(&mut buf[..]);
+    test_slice_writer_vectored(&mut writer);
+}
+
+#[test]
+fn test_buf_writer_seek() {
+    let mut buf = [0 as u8; 8];
+    {
+        let mut writer = Cursor::new(&mut buf[..]);
+        assert_eq!(writer.position(), 0);
+        assert_eq!(writer.write(&[1]).unwrap(), 1);
+        assert_eq!(writer.position(), 1);
+
+        assert_eq!(writer.seek(SeekFrom::Start(2)).unwrap(), 2);
+        assert_eq!(writer.position(), 2);
+        assert_eq!(writer.write(&[2]).unwrap(), 1);
+        assert_eq!(writer.position(), 3);
+
+        assert_eq!(writer.seek(SeekFrom::Current(-2)).unwrap(), 1);
+        assert_eq!(writer.position(), 1);
+        assert_eq!(writer.write(&[3]).unwrap(), 1);
+        assert_eq!(writer.position(), 2);
+
+        assert_eq!(writer.seek(SeekFrom::End(-1)).unwrap(), 7);
+        assert_eq!(writer.position(), 7);
+        assert_eq!(writer.write(&[4]).unwrap(), 1);
+        assert_eq!(writer.position(), 8);
+    }
+    let b: &[_] = &[1, 3, 2, 0, 0, 0, 0, 4];
+    assert_eq!(buf, b);
+}
+
+#[test]
+fn test_buf_writer_error() {
+    let mut buf = [0 as u8; 2];
+    let mut writer = Cursor::new(&mut buf[..]);
+    assert_eq!(writer.write(&[0]).unwrap(), 1);
+    assert_eq!(writer.write(&[0, 0]).unwrap(), 1);
+    assert_eq!(writer.write(&[0, 0]).unwrap(), 0);
+}
+
+#[test]
+fn test_mem_reader() {
+    let mut reader = Cursor::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    let mut buf = [];
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    assert_eq!(reader.position(), 0);
+    let mut buf = [0];
+    assert_eq!(reader.read(&mut buf).unwrap(), 1);
+    assert_eq!(reader.position(), 1);
+    let b: &[_] = &[0];
+    assert_eq!(buf, b);
+    let mut buf = [0; 4];
+    assert_eq!(reader.read(&mut buf).unwrap(), 4);
+    assert_eq!(reader.position(), 5);
+    let b: &[_] = &[1, 2, 3, 4];
+    assert_eq!(buf, b);
+    assert_eq!(reader.read(&mut buf).unwrap(), 3);
+    let b: &[_] = &[5, 6, 7];
+    assert_eq!(&buf[..3], b);
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+}
+
+#[test]
+fn test_mem_reader_vectored() {
+    let mut reader = Cursor::new(vec![0, 1, 2, 3, 4, 5, 6, 7]);
+    let mut buf = [];
+    assert_eq!(reader.read_vectored(&mut [IoSliceMut::new(&mut buf)]).unwrap(), 0);
+    assert_eq!(reader.position(), 0);
+    let mut buf = [0];
+    assert_eq!(
+        reader.read_vectored(&mut [IoSliceMut::new(&mut []), IoSliceMut::new(&mut buf),]).unwrap(),
+        1,
+    );
+    assert_eq!(reader.position(), 1);
+    let b: &[_] = &[0];
+    assert_eq!(buf, b);
+    let mut buf1 = [0; 4];
+    let mut buf2 = [0; 4];
+    assert_eq!(
+        reader
+            .read_vectored(&mut [IoSliceMut::new(&mut buf1), IoSliceMut::new(&mut buf2),])
+            .unwrap(),
+        7,
+    );
+    let b1: &[_] = &[1, 2, 3, 4];
+    let b2: &[_] = &[5, 6, 7];
+    assert_eq!(buf1, b1);
+    assert_eq!(&buf2[..3], b2);
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+}
+
+#[test]
+fn test_boxed_slice_reader() {
+    let mut reader = Cursor::new(vec![0, 1, 2, 3, 4, 5, 6, 7].into_boxed_slice());
+    let mut buf = [];
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+    assert_eq!(reader.position(), 0);
+    let mut buf = [0];
+    assert_eq!(reader.read(&mut buf).unwrap(), 1);
+    assert_eq!(reader.position(), 1);
+    let b: &[_] = &[0];
+    assert_eq!(buf, b);
+    let mut buf = [0; 4];
+    assert_eq!(reader.read(&mut buf).unwrap(), 4);
+    assert_eq!(reader.position(), 5);
+    let b: &[_] = &[1, 2, 3, 4];
+    assert_eq!(buf, b);
+    assert_eq!(reader.read(&mut buf).unwrap(), 3);
+    let b: &[_] = &[5, 6, 7];
+    assert_eq!(&buf[..3], b);
+    assert_eq!(reader.read(&mut buf).unwrap(), 0);
+}
+
+#[test]
+fn test_boxed_slice_reader_vectored() {
+    let mut reader = Cursor::new(vec![0, 1, 2, 3, 4, 5, 6, 7].int
+
+#![allow(missing_copy_implementations)]
+
+#[cfg(test)]
+mod tests;
+
+use crate::fmt;
+use crate::io::{
+    self, BorrowedCursor, BufRead, Empty, IoSlice, IoSliceMut, Read, Repeat, Seek, SeekFrom, Sink,
+    SizeHint, Write,
+};
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Read for Empty {
+    #[inline]
+    fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    #[inline]
+    fn read_buf(&mut self, _cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[inline]
+    fn read_vectored(&mut self, _bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
+        Ok(0)
+    }
+
+    #[inline]
+    fn is_read_vectored(&self) -> bool {
+        // Do not force `Chain<Empty, T>` or `Chain<T, Empty>` to use vectored
+        // reads, unless the other reader is v

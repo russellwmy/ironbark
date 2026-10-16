@@ -1,0 +1,15 @@
+[package]
+name = "ironbark-fetch"
+description = "Build a local experts.bin from a remote copy: on-demand records, hash checks, background fill"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ironbark-experts.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

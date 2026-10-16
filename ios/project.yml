@@ -1,0 +1,47 @@
+# xcodegen spec for the iOS benchmark app; ./build.sh builds the Rust library and runs xcodegen.
+name: IronbarkBench
+options:
+  bundleIdPrefix: dev.ironbark
+  deploymentTarget:
+    iOS: "26.2"
+targets:
+  IronbarkBench:
+    type: application
+    platform: iOS
+    sources:
+      - IronbarkBench
+      # MLX's Metal kernels, next to the app binary where MLX looks first.
+      - path: build/mlx.metallib
+        buildPhase: resources
+      - path: build/prompts
+        type: folder
+        buildPhase: resources
+    info:
+      path: build/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIApplicationSupportsIndirectInputEvents: true
+        # Replies continue off screen as continued-processing tasks (iOS 26, background GPU).
+        BGTaskSchedulerPermittedIdentifiers: [dev.ironbark.bench.reply.*]
+        UIBackgroundModes: [processing]
+    entitlements:
+      path: build/IronbarkBench.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+        # Background GPU Access (paid developer accounts only; personal teams cannot sign it).
+        # With it, a reply keeps generating off screen as a continued-processing task:
+        # com.apple.developer.background-tasks.continued-processing.gpu: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.ironbark.bench
+        DEVELOPMENT_TEAM: ${IRONBARK_TEAM}   # Apple Team ID, from the environment (see build.sh)
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTED_PLATFORMS: iphoneos
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: IronbarkBench/Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/../crates/ironbark-ffi/include
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../target/aarch64-apple-ios/release
+        OTHER_LDFLAGS: [-lironbark_ffi, -lc++, -framework, Metal, -framework, Accelerate]

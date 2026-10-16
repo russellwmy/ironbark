@@ -1,0 +1,39 @@
+# cargo deny check: licenses, advisories, banned / duplicate crates, sources.
+
+[graph]
+# The library only targets Apple Silicon macOS and iOS.
+targets = ["aarch64-apple-darwin", "aarch64-apple-ios"]
+all-features = false
+
+[advisories]
+# RustSec database; unmaintained and yanked crates are errors in our own dependencies.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Permissive licenses only (the crates may be linked into closed-source apps).
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Workspace crates are not published.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside the workspace are fine.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

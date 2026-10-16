@@ -1,0 +1,6 @@
+# Stable rustfmt options only (the toolchain is pinned to stable in rust-toolchain.toml).
+style_edition = "2024"
+max_width = 120
+# Wider than the defaults (60): kernel launches and MLX op chains read better on one line.
+fn_call_width = 100
+chain_width = 100

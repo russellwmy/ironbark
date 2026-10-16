@@ -1,0 +1,7 @@
+/target/
+**/target/
+.DS_Store
+/models/
+*.swp
+/ios/build/
+/ios/IronbarkBench.xcodeproj/

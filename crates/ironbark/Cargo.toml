@@ -1,0 +1,22 @@
+[package]
+name = "ironbark"
+description = "Run Maple (ternary MoE) on Apple Silicon with experts streamed from storage, sized to the device's memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ironbark-experts.workspace = true
+ironbark-mlx.workspace = true
+mlx-rs.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+
+[dev-dependencies]
+ironbark-fetch.workspace = true
+
+[lints]
+workspace = true

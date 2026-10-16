@@ -1,0 +1,28 @@
+# Thresholds for lints enabled in [workspace.lints] (Cargo.toml). Lint levels live there, not here.
+msrv = "1.99"
+
+# Size and complexity limits
+too-many-arguments-threshold = 7
+too-many-lines-threshold = 120
+cognitive-complexity-threshold = 25
+type-complexity-threshold = 250
+max-fn-params-bools = 2
+large-error-threshold = 128
+
+# Tests may unwrap, expect, panic, print and use dbg!
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
+# Words that are not code in doc comments
+doc-valid-idents = ["MoE", "DeepGrove", "FlashHead", "RoPE", "RMSNorm", "SiLU", "SwiGLU", "KV", "LRU", "SSD", "Metal", "MLX", "NAX", "macOS", "iOS", "iPhone", "..", "safetensors"]
+
+disallowed-methods = [
+  { path = "std::thread::sleep", reason = "use an event (Condvar, channel) instead of polling" },
+  { path = "std::process::exit", reason = "return an error from main so destructors run" },
+]
+disallowed-macros = [
+  { path = "std::dbg", reason = "remove debug output before commit" },
+]
