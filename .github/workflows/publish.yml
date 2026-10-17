@@ -1,9 +1,17 @@
 # Publish the crates to crates.io when a version tag (v0.1.0, v0.2.0-rc.1, ...) is pushed.
 #
-#   tag vX.Y.Z ──▶ tag == workspace version? ──▶ Metal toolchain ──▶ cargo publish --workspace
-#                       no: fail                                      (dependency order; builds
-#                                                                      each crate first; skips
-#                                                                      ironbark-ffi)
+#   tag vX.Y.Z ──▶ tag == workspace version? ──▶ for each crate, in dependency order:
+#                       no: fail                    on crates.io already? ──▶ skip
+#                                                   cargo publish --no-verify
+#                                                   429 (new-crate rate limit)? ──▶ wait, retry
+#
+# No build here: `--no-verify` packages and uploads the source, so the job runs on Linux
+# without MLX or the Metal toolchain. Check that the packages build before tagging:
+#
+#   cargo publish --workspace --dry-run
+#
+# Rerun for an existing tag (e.g. after a rate limit): Actions > Publish > Run workflow, tag vX.Y.Z.
+# Crates already published are skipped.
 #
 # Needs the repo secret CARGO_REGISTRY_TOKEN (crates.io API token, scope: publish-new + publish-update).
 name: Publish
@@ -11,6 +19,11 @@ name: Publish
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Version tag to publish (e.g. v0.1.0)
+        required: true
 
 permissions:
   contents: read
@@ -19,14 +32,22 @@ concurrency:
   group: publish
   cancel-in-progress: false
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  # Dependency order; ironbark-ffi is publish = false.
+  CRATES: >-
+    ironbark-mlx-sys ironbark-mlx ironbark-experts ironbark-fetch
+    ironbark-engine ironbark ironbark-cli
+
 jobs:
   publish:
-    # MLX needs Apple Silicon and the Metal compiler.
-    runs-on: macos-26
-    # The verify builds compile MLX from source.
-    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    # crates.io allows a burst of new crates, then one per 10 minutes.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup toolchain install && cargo --version
@@ -35,15 +56,38 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "ironbark") | .version')
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $version"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match workspace version $version"
             exit 1
           fi
-
-      - name: Metal toolchain
-        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          echo "VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Publish
-        run: cargo publish --workspace
+        # bash -eo pipefail: `cargo publish | tee` fails when cargo does.
+        shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          ua="ironbark-publish (github.com/${GITHUB_REPOSITORY})"
+          for crate in $CRATES; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -A "$ua" \
+              "https://crates.io/api/v1/crates/$crate/$VERSION")
+            if [ "$code" = 200 ]; then
+              echo "$crate $VERSION: already on crates.io, skipped"
+              continue
+            fi
+            for attempt in 1 2 3 4 5 6; do
+              if cargo publish -p "$crate" --no-verify 2>&1 | tee publish.log; then
+                break
+              fi
+              if ! grep -q '429' publish.log || [ "$attempt" = 6 ]; then
+                exit 1
+              fi
+              # "Please try again after Sat, 17 Oct 2026 04:08:23 GMT": wait until then (+30 s).
+              after=$(grep -oE 'try again after [^.]+ GMT' publish.log | sed 's/try again after //')
+              wait=$(( $(date -d "$after" +%s 2>/dev/null || date -d '+10 min' +%s) - $(date +%s) + 30 ))
+              [ "$wait" -lt 30 ] && wait=30
+              echo "::notice::$crate: rate limited, retry $attempt in ${wait}s"
+              sleep "$wait"
+            done
+          done

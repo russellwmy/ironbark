@@ -149,22 +149,26 @@ cargo deny check
 
 ### Release
 
-Pushing a version tag publishes the crates to crates.io (`.github/workflows/publish.yml`, macOS runner):
+Pushing a version tag publishes the crates to crates.io (`.github/workflows/publish.yml`, Linux runner, no build: `--no-verify` uploads the source):
 
 ```
- bump version ──▶ commit, push ──▶ git tag vX.Y.Z ──▶ git push origin vX.Y.Z
-                                                          │
-                                                          ▼
-                        tag == workspace version? ──▶ cargo publish --workspace (all but ironbark-ffi)
+ bump version ──▶ dry run ──▶ commit, push ──▶ git tag vX.Y.Z ──▶ git push origin vX.Y.Z
+                                                                       │
+                                                                       ▼
+          tag == workspace version? ──▶ each crate in dependency order (all but ironbark-ffi):
+                                        already published? skip; else cargo publish --no-verify;
+                                        429? wait for the time crates.io gives, retry
 ```
 
 | Step | How |
 |---|---|
 | Once | Add a crates.io API token as the repo secret `CARGO_REGISTRY_TOKEN` (scopes: publish-new, publish-update) |
 | Bump | `version` in `[workspace.package]` and in `[workspace.dependencies]` of the root `Cargo.toml` |
+| Dry run | `cargo publish --workspace --dry-run`: builds each package as crates.io gets it (CI does not) |
 | Tag | `git tag v0.1.0 && git push origin v0.1.0`: the tag must equal the version, or the job fails before publishing |
+| Rerun | Actions > Publish > Run workflow with the tag: publishes only the crates not yet on crates.io |
 
-A crates.io version can be yanked, not deleted. If a run stops partway, the crates already published stay; bump the version and tag again.
+A crates.io version can be yanked, not deleted. New crates are rate limited (a burst, then one per 10 minutes), so a first release can wait between crates; the job waits and retries.
 
 ## Usage
 
