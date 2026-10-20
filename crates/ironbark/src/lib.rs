@@ -151,6 +151,28 @@ struct Turn {
     finish: Option<Finish>,
 }
 
+/// Most system turns kept read ([`Session::set_system`]), so switching between them is cheap.
+const SYSTEM_KVS: usize = 4;
+
+/// A saved conversation ([`Session::snapshot`]): its KV cache, its system turn, and how the
+/// next turn closes the last one.
+#[derive(Debug, Clone)]
+pub struct Snapshot {
+    kv: KvSnapshot,
+    context: usize,
+    system: String,
+    chatting: bool,
+    close: &'static str,
+}
+
+impl Snapshot {
+    /// Tokens in the saved conversation.
+    #[must_use]
+    pub fn context(&self) -> usize {
+        self.context
+    }
+}
+
 /// A model open for generation, with its tokenizer and the plan that sized it.
 #[derive(Debug)]
 pub struct Session {
@@ -166,8 +188,12 @@ pub struct Session {
     chatting: bool,
     /// System turn that starts each conversation (see [`Session::set_system`]).
     system: String,
-    /// The KV cache after the system turn, so a new conversation does not read it again.
-    system_kv: Option<KvSnapshot>,
+    /// The KV cache after each recent system turn (oldest first, at most [`SYSTEM_KVS`]), so
+    /// a new conversation, also after switching system turns, does not read it again.
+    system_kvs: Vec<(String, KvSnapshot)>,
+    /// How the next turn closes the last one, when set by [`Session::read`] or
+    /// [`Session::restore`] rather than by the last reply.
+    close: Option<&'static str>,
     /// Replies reason first (see [`Session::set_thinking`]).
     think: bool,
 }
@@ -216,7 +242,8 @@ impl Session {
             turn: None,
             chatting: false,
             system: String::new(),
-            system_kv: None,
+            system_kvs: Vec::new(),
+            close: None,
             think: true,
         })
     }
@@ -268,6 +295,89 @@ impl Session {
         self.model.reset();
         self.turn = None;
         self.chatting = false;
+        self.close = None;
+    }
+
+    /// Save the conversation, to come back to it with [`Session::restore`] (e.g. after a
+    /// side conversation on another system turn). Cheap: the KV cache is shared, not copied.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            kv: self.model.snapshot(),
+            context: self.model.pos,
+            system: self.system.clone(),
+            chatting: self.chatting,
+            close: self.closing(),
+        }
+    }
+
+    /// Return to a conversation saved by [`Session::snapshot`], with its system turn; the
+    /// next message continues it.
+    pub fn restore(&mut self, snapshot: &Snapshot) {
+        self.model.restore(&snapshot.kv);
+        self.system.clone_from(&snapshot.system);
+        self.turn = None;
+        self.chatting = snapshot.chatting;
+        self.close = Some(snapshot.close);
+    }
+
+    /// Read `messages` into the conversation (after the system turn in a new one) without a
+    /// reply, e.g. few-shot samples to [`Session::snapshot`] once and restore for each
+    /// question. Returns the tokens read.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the messages are empty or do not fit the context left, or the model fails.
+    pub fn read(&mut self, messages: &[Message<'_>]) -> Result<usize> {
+        let turns: String = messages.iter().map(Message::turn).collect();
+        let close = self.closing();
+        self.open_system()?;
+        let reset = !self.chatting && self.system.is_empty();
+        let read = self.start(&format!("{close}{turns}"), reset)?;
+        self.turn = None;
+        self.chatting = true;
+        // The turns end with their end token and line break.
+        self.close = Some("");
+        Ok(read)
+    }
+
+    /// How the next turn closes the last one: nothing in a new conversation; its end token
+    /// when the last reply was dropped before the model ended it; else the line break after
+    /// the end token the reply put in the KV cache.
+    fn closing(&self) -> &'static str {
+        if let Some(close) = self.close {
+            return close;
+        }
+        let open = self.turn.as_ref().is_some_and(|t| t.finish.is_none());
+        match (self.chatting, open) {
+            (false, _) => "",
+            (true, true) => "<|im_end|>\n",
+            (true, false) => "\n",
+        }
+    }
+
+    /// In a new conversation, put the system turn in the KV cache: restored when it was read
+    /// recently, else read now. Returns the tokens read and the time it took (zero when
+    /// restored or not needed).
+    fn open_system(&mut self) -> Result<(usize, f64)> {
+        if self.chatting || self.system.is_empty() {
+            return Ok((0, 0.0));
+        }
+        if let Some(i) = self.system_kvs.iter().position(|(text, _)| *text == self.system) {
+            let entry = self.system_kvs.remove(i);
+            self.model.restore(&entry.1);
+            self.system_kvs.push(entry);
+            return Ok((0, 0.0));
+        }
+        let system = self.system.clone();
+        let tokens = self.start(&system, true)?;
+        let read_s = self.turn.as_ref().map_or(0.0, |t| t.prefill_s);
+        self.turn = None;
+        if self.system_kvs.len() == SYSTEM_KVS {
+            self.system_kvs.remove(0);
+        }
+        self.system_kvs.push((system, self.model.snapshot()));
+        Ok((tokens, read_s))
     }
 
     /// Benchmark: from an empty context, read `prompt` and generate `tokens` tokens greedily,
@@ -292,10 +402,10 @@ impl Session {
 
     /// Start every conversation with a system turn: `system` and, with `tools` (JSON schemas,
     /// `{"type": "function", "function": {"name", "description", "parameters"}}`), the tool-call
-    /// format (see [`tools`]). Forgets the conversation.
+    /// format (see [`tools`]). Forgets the conversation. The last few system turns stay read,
+    /// so switching back to one does not read it again.
     pub fn set_system(&mut self, system: Option<&str>, tools: &[Value]) {
         self.system = tools::system_turn(system, tools);
-        self.system_kv = None;
         self.reset();
     }
 
@@ -357,24 +467,10 @@ impl Session {
 
     /// Read user turns `turn` after the conversation and open the model's turn.
     fn open_turn(&mut self, turn: &str) -> Result<Reply<'_>> {
-        // Close the previous turn: its end token is in the KV cache, unless the reply was
-        // dropped before the model ended it.
-        let open = self.turn.as_ref().is_some_and(|t| t.finish.is_none());
-        let close = match (self.chatting, open) {
-            (false, _) => "",
-            (true, true) => "<|im_end|>\n",
-            (true, false) => "\n",
-        };
+        // Close the previous turn (see `closing`).
+        let close = self.closing();
         // A new conversation starts from the system turn, read once and then restored.
-        if !self.chatting && !self.system.is_empty() {
-            if let Some(kv) = &self.system_kv {
-                self.model.restore(kv);
-            } else {
-                let system = self.system.clone();
-                self.start(&system, true)?;
-                self.system_kv = Some(self.model.snapshot());
-            }
-        }
+        let (system_tokens, system_s) = self.open_system()?;
         // After tool results the model reasons even when off: without it, it called the same
         // tool again instead of answering.
         let think = self.think || turn.contains("<tool_response>");
@@ -382,13 +478,17 @@ impl Session {
         let text = format!("{close}{turn}<|im_start|>assistant\n{reasoning}");
         let reset = !self.chatting && self.system.is_empty();
         self.start(&text, reset)?;
-        if !think {
-            // The reply is shown from the end of its (empty) reasoning, as parse expects.
-            if let Some(t) = &mut self.turn {
+        if let Some(t) = &mut self.turn {
+            // The turn's stats count the system turn when it was read for it.
+            t.prompt += system_tokens;
+            t.prefill_s += system_s;
+            if !think {
+                // The reply is shown from the end of its (empty) reasoning, as parse expects.
                 t.prefix = "</think>\n\n".into();
             }
         }
         self.chatting = true;
+        self.close = None;
         Ok(Reply { session: self })
     }
 

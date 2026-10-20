@@ -82,6 +82,59 @@ fn a_new_conversation_restores_the_system_turn() {
 }
 
 #[test]
+fn switching_system_turns_keeps_both_read() {
+    let Some(mut s) = open(Options::default()) else { return };
+    let a = Some("You are terse. Today is 2026-10-15.");
+    let b = Some("You sort messages. Reply with one word.");
+    s.set_system(a, &[]);
+    let first = reply(&mut s, "Name a primary colour. One word.");
+    let read_first = s.stats().prompt_tokens;
+    s.set_system(b, &[]);
+    reply(&mut s, "hello");
+    s.set_system(a, &[]);
+    // System turn a was kept: the same reply, and only the message read this time.
+    let again = reply(&mut s, "Name a primary colour. One word.");
+    assert_eq!(first, again);
+    assert!(s.stats().prompt_tokens < read_first);
+}
+
+#[test]
+fn a_snapshot_survives_a_side_conversation() {
+    let Some(mut s) = open(Options::default()) else { return };
+    s.set_system(Some("You are terse."), &[]);
+    reply(&mut s, "My name is Ada. Say ok.");
+    let held = s.snapshot();
+    assert_eq!(held.context(), s.context());
+    s.set_system(Some("You sort messages. Reply with one word."), &[]);
+    reply(&mut s, "hello");
+    s.restore(&held);
+    let name = reply(&mut s, "What is my name? One word.");
+    assert!(name.contains("Ada"), "{name}");
+}
+
+#[test]
+fn read_samples_once_then_restore_them() {
+    let Some(mut s) = open(Options::default()) else { return };
+    s.set_system(Some("Reply with the colour of the thing, one word."), &[]);
+    let read = s
+        .read(&[
+            ironbark::Message::User("grass"),
+            ironbark::Message::Assistant("green"),
+            ironbark::Message::User("the sky"),
+            ironbark::Message::Assistant("blue"),
+        ])
+        .unwrap();
+    assert!(read > 0);
+    let samples = s.snapshot();
+    s.set_thinking(false);
+    let snow = reply(&mut s, "snow");
+    s.restore(&samples);
+    let again = reply(&mut s, "snow");
+    assert_eq!(snow, again);
+    assert!(ironbark::parse(&snow).text.to_lowercase().contains("white"), "{snow}");
+}
+
+#[test]
 fn without_thinking_a_reply_starts_after_its_reasoning() {
     let Some(mut s) = open(Options::default()) else { return };
     s.set_thinking(false);
