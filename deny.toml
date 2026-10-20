@@ -9,6 +9,11 @@ all-features = false
 # RustSec database; unmaintained and yanked crates are errors in our own dependencies.
 unmaintained = "workspace"
 yanked = "deny"
+ignore = [
+    # paste is unmaintained, with no successor release; ironbark-mlx and tokenizers use it at
+    # build time only (a proc macro), so nothing of it ships.
+    { id = "RUSTSEC-2024-0436", reason = "paste: unmaintained proc macro, no upgrade; build time only (ironbark-mlx, tokenizers)" },
+]
 
 [licenses]
 # Permissive licenses only (the crates may be linked into closed-source apps).
