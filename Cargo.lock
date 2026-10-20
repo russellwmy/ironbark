@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ironbark-engine",
  "ironbark-experts",
@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "half",
  "ironbark-experts",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-experts"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-fetch"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ironbark-experts",
  "serde_json",
@@ -577,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-ffi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ironbark",
  "ironbark-engine",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-mlx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "float_eq",
@@ -610,7 +610,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-mlx-sys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bindgen",
  "cc",
