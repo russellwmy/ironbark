@@ -683,9 +683,9 @@ impl Model {
 
             // Mixture of experts: add + norm, route, experts, then the weighted sum is folded
             // into the next add + norm (the next layer's input norm, or the final norm).
-            (h, hn) = self.fused.add_norm(&h, &r, &ly.post_norm)?;
+            let (ids, scores);
+            (h, hn, ids, scores) = self.fused.add_norm_router(&h, &r, &ly.post_norm, &ly.router)?;
             let next = self.layers.get(i + 1).map_or(&self.norm, |l| &l.in_norm);
-            let (ids, scores) = self.fused.router(&hn, &ly.router)?;
             if let (Some(st), None) = (&self.stream, &ly.experts)
                 && let Some(all) = &st.all
             {

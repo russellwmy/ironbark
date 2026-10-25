@@ -5,6 +5,8 @@
 //!   agg_norm      h' = h + Σ_e score_e · y_e (fp32, ordered, bf16 round);  hn = RMSNorm(h') · w
 //!   qk_norm_rope  per-head RMSNorm of q and k, RoPE on the first ROPE_DIM dims (0 = none)
 //!   router        logits = hn · Gᵀ (fp32); softmax; top-8; renormalize       2 launches (6 unfused)
+//!   add_norm_router  add_norm + router in 2 launches: each GEMV threadgroup recomputes the
+//!                 norm (2048 values) instead of waiting for a separate launch (Mac only)
 //! ```
 //!
 //! Ported from DeepGrove's `maple.py` (deepgrove/maple-preview-2bit-mlx). Reductions follow
@@ -51,6 +53,43 @@ const ADD_NORM: &str = r"
         uint j = tid * PT + i;
         STORE_HN
     }
+";
+
+/// Router GEMV of one simdgroup per row (16 rows per 512-thread threadgroup) on `hn` held in
+/// threadgroup memory `xs`; per row the same arithmetic as [`ROUTER_GEMV`].
+const NORM_GEMV: &str = r"
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    {
+        constexpr int K = 2048;
+        constexpr int TN = 4;
+        uint lane = tid % 32;
+        uint row = threadgroup_position_in_grid.x * 16 + tid / 32;
+        float result = 0.0f;
+        for (int base = 0; base < K; base += 128) {
+            float v[TN];
+            #pragma clang loop unroll(full)
+            for (int n = 0; n < TN; n++)
+                v[n] = float(xs[base + lane * TN + n]);
+            #pragma clang loop unroll(full)
+            for (int n = 0; n < TN; n++) {
+                float wv = float(mat[row * K + base + lane * TN + n]);
+                result += wv * v[n];
+            }
+        }
+        #pragma clang loop unroll(full)
+        for (ushort offset = 16; offset >= 1; offset >>= 1)
+            result += simd_shuffle_down(result, offset);
+        if (lane == 0) logits[row] = result;
+    }
+";
+
+/// [`ADD_NORM`] stores for [`NORM_GEMV`]: hn to threadgroup memory; threadgroup 0 also writes
+/// h and hn out.
+const STORE_H_FIRST: &str = "if (threadgroup_position_in_grid.x == 0) h_out[j] = vb;";
+const STORE_HN_SHARED: &str = r"
+        T_ hv = (T_)((float)w[j] * (hb[i] * scale));
+        xs[j] = hv;
+        if (threadgroup_position_in_grid.x == 0) hn_out[j] = hv;
 ";
 
 const RESIDUAL_ADD: &str = "float v = (float)x[j] + (float)r[j];";
@@ -228,6 +267,11 @@ pub(crate) const HIDDEN: i32 = 2048;
 pub(crate) struct Fused {
     add_norm: Kernel,
     agg_norm: Kernel,
+    norm_gemv: Kernel,
+    /// Run add + norm inside the router GEMV ([`Fused::add_norm_router`]). On the Mac this saves
+    /// a launch per layer (~4% decode); on iPhone 17 every shape tried was within noise of
+    /// separate launches, so iOS keeps those.
+    fuse_router: bool,
     qk: Kernel,
     gemv: Kernel,
     select: Kernel,
@@ -243,17 +287,19 @@ fn router(body: &str) -> String {
 impl Fused {
     pub(crate) fn new(eps: f32, theta: f32) -> Self {
         let eps_lit = format!("{eps:.10e}f");
-        let body = |residual: &str, guarded: bool| {
-            let (h, hn) = if guarded {
-                (format!("{GUARD} {{ {STORE_H} }}"), format!("{GUARD} {{ {STORE_HN} }}"))
-            } else {
-                (STORE_H.to_owned(), STORE_HN.to_owned())
-            };
+        let norm = |residual: &str, h: &str, hn: &str| {
             ADD_NORM
                 .replace("RESIDUAL", residual)
-                .replace("STORE_HN", &hn)
-                .replace("STORE_H", &h)
+                .replace("STORE_HN", hn)
+                .replace("STORE_H", h)
                 .replace("EPS_", &eps_lit)
+        };
+        let body = |residual: &str, guarded: bool| {
+            if guarded {
+                norm(residual, &format!("{GUARD} {{ {STORE_H} }}"), &format!("{GUARD} {{ {STORE_HN} }}"))
+            } else {
+                norm(residual, STORE_H, STORE_HN)
+            }
         };
         Fused {
             add_norm: Kernel::new(
@@ -270,6 +316,13 @@ impl Fused {
                 &body(RESIDUAL_AGG, true),
                 "",
             ),
+            norm_gemv: Kernel::new(
+                "ironbark_add_rms_norm_router_gemv",
+                &["x", "r", "w", "mat"],
+                &["h_out", "hn_out", "logits"],
+                &format!("threadgroup T_ xs[DIM];\n{}{NORM_GEMV}", norm(RESIDUAL_ADD, STORE_H_FIRST, STORE_HN_SHARED)),
+                "",
+            ),
             qk: Kernel::new("ironbark_qk_norm_rope", &["x", "qw", "kw", "pos_eps"], &["out"], QK_NORM_ROPE, ""),
             gemv: Kernel::new("ironbark_router_gemv", &["x", "mat"], &["logits"], ROUTER_GEMV, ""),
             select: Kernel::new(
@@ -279,6 +332,7 @@ impl Fused {
                 &router(ROUTER_SELECT),
                 "",
             ),
+            fuse_router: !cfg!(target_os = "ios"),
             eps,
             log2_theta: theta.log2(),
         }
@@ -349,12 +403,58 @@ impl Fused {
         Ok(o.remove(0))
     }
 
+    /// [`Fused::add_norm`] then [`Fused::router`] on its hn: (h, hn, ids, scores).
+    pub(crate) fn add_norm_router(
+        &self,
+        h: &Array,
+        r: &Array,
+        w: &Array,
+        gate: &Array,
+    ) -> Result<(Array, Array, Array, Array)> {
+        if !self.fuse_router {
+            let (h, hn) = self.add_norm(h, r, w)?;
+            let (ids, scores) = self.router(&hn, gate)?;
+            return Ok((h, hn, ids, scores));
+        }
+        let dt = h.dtype();
+        let shape = [1, 1, HIDDEN];
+        let mut o = self.norm_gemv.apply(
+            &[h, r, w, gate],
+            &[Template::Dtype("T_", dt), Template::Int("DIM", HIDDEN)],
+            (256 / 16 * HIDDEN / 4, 1, 1),
+            (HIDDEN / 4, 1, 1),
+            &[
+                Output {
+                    shape: &shape,
+                    dtype: dt,
+                },
+                Output {
+                    shape: &shape,
+                    dtype: dt,
+                },
+                Output {
+                    shape: &[256],
+                    dtype: Dtype::Float32,
+                },
+            ],
+        )?;
+        let logits = o.remove(2);
+        let hn = o.remove(1);
+        let (ids, scores) = self.select(&logits)?;
+        Ok((o.remove(0), hn, ids, scores))
+    }
+
     /// Router of one token: `hn` `[1, 1, 2048]`, `gate` `[256, 2048]` -> (ids `[8]` u32, scores
     /// `[8]` f32), ids in selection order.
     pub(crate) fn router(&self, hn: &Array, gate: &Array) -> Result<(Array, Array)> {
         let logits = self.logits(hn, gate)?;
+        self.select(&logits)
+    }
+
+    /// Softmax, top-8 and renormalized scores of router `logits` `[256]` f32.
+    fn select(&self, logits: &Array) -> Result<(Array, Array)> {
         let mut o = self.select.apply(
-            &[&logits],
+            &[logits],
             &[],
             (128, 1, 1),
             (128, 1, 1),
@@ -431,6 +531,26 @@ mod tests {
         let want = &h + &r;
         assert_eq!(bits(&hh), bits(&want));
         assert_eq!(bits(&hn), bits(&rms(&want, &w)));
+    }
+
+    #[test]
+    fn add_norm_router_matches_separate() {
+        let mut f = Fused::new(EPS, 10_000.0);
+        let h = vec_bf16(HIDDEN, 12, 1e-3).reshape(&[1, 1, HIDDEN]).unwrap();
+        let r = vec_bf16(HIDDEN, 13, 2e-3).reshape(&[1, 1, HIDDEN]).unwrap();
+        let w = vec_bf16(HIDDEN, 14, 1e-3);
+        let gate = vec_bf16(256 * HIDDEN, 15, 2e-3).reshape(&[256, HIDDEN]).unwrap();
+        let (want_h, want_hn) = f.add_norm(&h, &r, &w).unwrap();
+        let (want_ids, want_scores) = f.router(&want_hn, &gate).unwrap();
+        // Fused (Mac) and separate launches (iOS).
+        for fuse in [true, false] {
+            f.fuse_router = fuse;
+            let (hh, hn, ids, scores) = f.add_norm_router(&h, &r, &w, &gate).unwrap();
+            assert_eq!(bits(&hh), bits(&want_h), "fused {fuse}");
+            assert_eq!(bits(&hn), bits(&want_hn), "fused {fuse}");
+            assert_eq!(ids.as_slice::<u32>(), want_ids.as_slice::<u32>(), "fused {fuse}");
+            assert_eq!(bits(&scores), bits(&want_scores), "fused {fuse}");
+        }
     }
 
     #[test]
