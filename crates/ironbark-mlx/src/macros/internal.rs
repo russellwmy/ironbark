@@ -1,5 +1,5 @@
 /// See `assertEqual` in the swift binding tests
-#[allow(unused_macros)]
+#[cfg(test)]
 macro_rules! assert_array_all_close {
     ($a:tt, $b:tt) => {
         let _b: Array = $b.into();
@@ -8,7 +8,6 @@ macro_rules! assert_array_all_close {
     };
 }
 
-#[allow(unused_macros)]
 macro_rules! cfg_safetensors {
     ($($item:item)*) => {
         $(

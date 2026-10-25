@@ -58,12 +58,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_abs(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`abs`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `abs`")]
-    pub fn abs_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.abs())
-    }
-
     /// Element-wise addition returning an error if arrays are not broadcastable.
     ///
     /// Add two arrays with [broadcasting](https://swiftpackageindex.com/ml-explore/mlx-swift/main/documentation/mlx/broadcasting).
@@ -88,12 +82,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_add(res, self.as_ptr(), other.as_ref().as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`add`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `add`")]
-    pub fn add_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.add(other))
     }
 
     /// Element-wise subtraction returning an error if arrays are not broadcastable.
@@ -122,12 +110,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`subtract`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `subtract`")]
-    pub fn subtract_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.subtract(other))
-    }
-
     /// Unary element-wise negation. Returns an error if the array is of type bool.
     ///
     /// Negate the values in the array.
@@ -147,12 +129,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_negative(res, self.as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`negative`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `negative`")]
-    pub fn negative_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.negative())
     }
 
     /// Element-wise multiplication returning an error if arrays are not broadcastable.
@@ -175,12 +151,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_multiply(res, self.as_ptr(), other.as_ref().as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`multiply`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `multiply`")]
-    pub fn multiply_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.multiply(other))
     }
 
     /// Replace NaN and Inf values with finite numbers.
@@ -223,18 +193,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`nan_to_num`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `nan_to_num`")]
-    pub fn nan_to_num_device(
-        &self,
-        nan: impl IntoOption<f32>,
-        pos_inf: impl IntoOption<f32>,
-        neg_inf: impl IntoOption<f32>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.nan_to_num(nan, pos_inf, neg_inf))
-    }
-
     /// Element-wise division returning an error if arrays are not broadcastable.
     ///
     /// Divide two arrays with [broadcasting](https://swiftpackageindex.com/ml-explore/mlx-swift/main/documentation/mlx/broadcasting).
@@ -259,12 +217,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_divide(res, self.as_ptr(), other.as_ref().as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`divide`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `divide`")]
-    pub fn divide_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.divide(other))
     }
 
     /// Element-wise power operation returning an error if arrays are not broadcastable if they have different shapes.
@@ -293,12 +245,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`power`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `power`")]
-    pub fn power_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.power(other))
-    }
-
     /// Element-wise remainder of division returning an error if arrays are not broadcastable.
     ///
     /// Computes the remainder of dividing `lhs` with `rhs` with [broadcasting](https://swiftpackageindex.com/ml-explore/mlx-swift/main/documentation/mlx/broadcasting).
@@ -325,12 +271,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`remainder`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `remainder`")]
-    pub fn remainder_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.remainder(other))
-    }
-
     /// Element-wise square root
     ///
     /// # Example
@@ -348,12 +288,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_sqrt(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`sqrt`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `sqrt`")]
-    pub fn sqrt_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.sqrt())
-    }
-
     /// Element-wise cosine
     ///
     /// # Example
@@ -369,12 +303,6 @@ impl Array {
     pub fn cos(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_cos(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`cos`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `cos`")]
-    pub fn cos_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.cos())
     }
 
     /// Element-wise exponential.
@@ -396,12 +324,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_exp(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`exp`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `exp`")]
-    pub fn exp_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.exp())
-    }
-
     /// Element-wise floor returning an error if the array is of type complex64.
     ///
     /// # Example
@@ -417,12 +339,6 @@ impl Array {
     pub fn floor(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_floor(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`floor`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `floor`")]
-    pub fn floor_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.floor())
     }
 
     /// Element-wise integer division returning an error if arrays are not broadcastable.
@@ -455,12 +371,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`floor_divide`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `floor_divide`")]
-    pub fn floor_divide_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.floor_divide(other))
-    }
-
     /// Return a boolean array indicating which elements are NaN.
     ///
     /// # Params
@@ -470,12 +380,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_isnan(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`is_nan`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `is_nan`")]
-    pub fn is_nan_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.is_nan())
-    }
-
     /// Return a boolean array indicating which elements are infinity.
     ///
     /// # Params
@@ -483,12 +387,6 @@ impl Array {
     pub fn is_inf(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_isinf(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`is_inf`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `is_inf`")]
-    pub fn is_inf_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.is_inf())
     }
 
     /// Return a boolean array indicating which elements are finite.
@@ -502,12 +400,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`is_finite`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `is_finite`")]
-    pub fn is_finite_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.is_finite())
-    }
-
     /// Return a boolean array indicating which elements are negative infinity.
     ///
     /// # Params
@@ -519,12 +411,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`is_neg_inf`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `is_neg_inf`")]
-    pub fn is_neg_inf_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.is_neg_inf())
-    }
-
     /// Return a boolean array indicating which elements are positive infinity.
     ///
     /// # Params
@@ -534,12 +420,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_isposinf(res, self.as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`is_pos_inf`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `is_pos_inf`")]
-    pub fn is_pos_inf_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.is_pos_inf())
     }
 
     /// Element-wise natural logarithm.
@@ -559,12 +439,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_log(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`log`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `log`")]
-    pub fn log_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.log())
-    }
-
     /// Element-wise base-2 logarithm.
     ///
     /// # Example
@@ -580,12 +454,6 @@ impl Array {
     pub fn log2(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_log2(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`log2`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `log2`")]
-    pub fn log2_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.log2())
     }
 
     /// Element-wise base-10 logarithm.
@@ -605,12 +473,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_log10(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`log10`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `log10`")]
-    pub fn log10_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.log10())
-    }
-
     /// Element-wise natural log of one plus the array.
     ///
     /// # Example
@@ -626,12 +488,6 @@ impl Array {
     pub fn log1p(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_log1p(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`log1p`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `log1p`")]
-    pub fn log1p_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.log1p())
     }
 
     /// Matrix multiplication returning an error if inputs are not valid.
@@ -670,12 +526,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`matmul`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `matmul`")]
-    pub fn matmul_device(&self, other: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.matmul(other))
-    }
-
     /// Element-wise reciprocal.
     ///
     /// # Example
@@ -695,12 +545,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`reciprocal`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `reciprocal`")]
-    pub fn reciprocal_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.reciprocal())
-    }
-
     /// Round to the given number of decimals.
     ///
     /// # Params
@@ -713,22 +557,10 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`round`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `round`")]
-    pub fn round_device(&self, decimals: impl Into<Option<i32>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.round(decimals))
-    }
-
     /// Element-wise reciprocal and square root.
     pub fn rsqrt(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_rsqrt(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`rsqrt`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `rsqrt`")]
-    pub fn rsqrt_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.rsqrt())
     }
 
     /// Element-wise sine.
@@ -737,22 +569,10 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_sin(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`sin`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `sin`")]
-    pub fn sin_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.sin())
-    }
-
     /// Element-wise square.
     pub fn square(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_square(res, self.as_ptr(), stream.as_ref().as_ptr()) })
-    }
-
-    /// Compatibility shim for [`square`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `square`")]
-    pub fn square_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.square())
     }
 
     /// Element-wise real part from a complex array.
@@ -761,23 +581,12 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_real(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`real`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `real`")]
-    pub fn real_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.real())
-    }
-
     /// Element-wise imag part from a complex array.
     pub fn imag(&self) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_imag(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`imag`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `imag`")]
-    pub fn imag_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.imag())
-    }
 }
 
 /// Element-wise absolute value.
@@ -1765,11 +1574,16 @@ mod tests {
 
     #[test]
     fn test_floor_divide_complex64() {
+        // MLX 0.32.4 accepts complex operands (0.32.2 raised) and returns the plain quotient.
         let val = complex64::new(1.0, 2.0);
         let a = Array::from_complex(val);
         let b = Array::from_slice(&[4.0, 5.0, 6.0], &[3]);
-        let c = a.floor_divide(&b);
-        assert!(c.is_err());
+        let c = a.floor_divide(&b).unwrap();
+        assert_eq!(c.dtype(), Dtype::Complex64);
+        assert_eq!(c.shape(), &[3]);
+        for (got, d) in c.as_slice::<complex64>().iter().zip([4.0f32, 5.0, 6.0]) {
+            assert!((got.re - 1.0 / d).abs() < 1e-6 && (got.im - 2.0 / d).abs() < 1e-6, "{got}");
+        }
     }
 
     #[test]

@@ -182,97 +182,6 @@ pub fn norm_l2(array: impl AsRef<Array>, options: NormOptions) -> Result<Array> 
     })
 }
 
-// TODO: Change the original `norm` function to use builder pattern
-// /// Matrix or vector norm.
-// ///
-// /// For values of `ord < 1`, the result is, strictly speaking, not a
-// /// mathematical norm, but it may still be useful for various numerical
-// /// purposes.
-// ///
-// /// The following norms can be calculated:
-// ///
-// /// ord   | norm for matrices            | norm for vectors
-// /// ----- | ---------------------------- | --------------------------
-// /// None  | Frobenius norm               | 2-norm
-// /// 'fro' | Frobenius norm               | --
-// /// inf   | max(sum(abs(x), axis-1))     | max(abs(x))
-// /// -inf  | min(sum(abs(x), axis-1))     | min(abs(x))
-// /// 0     | --                           | sum(x !- 0)
-// /// 1     | max(sum(abs(x), axis-0))     | as below
-// /// -1    | min(sum(abs(x), axis-0))     | as below
-// /// 2     | 2-norm (largest sing. value) | as below
-// /// -2    | smallest singular value      | as below
-// /// other | --                           | sum(abs(x)**ord)**(1./ord)
-// ///
-// /// > Nuclear norm and norms based on singular values are not yet implemented.
-// ///
-// /// The Frobenius norm is given by G. H. Golub and C. F. Van Loan, *Matrix Computations*,
-// ///        Baltimore, MD, Johns Hopkins University Press, 1985, pg. 15
-// ///
-// /// The nuclear norm is the sum of the singular values.
-// ///
-// /// Both the Frobenius and nuclear norm orders are only defined for
-// /// matrices and produce a fatal error when `array.ndim != 2`
-// ///
-// /// # Params
-// ///
-// /// - `array`: input array
-// /// - `ord`: order of the norm, see table
-// /// - `axes`: axes that hold 2d matrices
-// /// - `keep_dims`: if `true` the axes which are normed over are left in the result as dimensions
-// ///   with size one
-// #[generate_macro(customize(forwarding_shim = true, root = "$crate::linalg"))]
-// #[default_device]
-// pub fn norm_device<'a>(
-//     array: impl AsRef<Array>,
-//     #[optional] ord: impl IntoOption<Ord<'a>>,
-//     #[optional] axes: impl IntoOption<&'a [i32]>,
-//     #[optional] keep_dims: impl Into<Option<bool>>,
-//     #[optional] stream: impl AsRef<Stream>,
-// ) -> Result<Array> {
-//     let ord = ord.into_option();
-//     let axes = axes.into_option();
-//     let keep_dims = keep_dims.into().unwrap_or(false);
-
-//     match (ord, axes) {
-//         // If axis and ord are both unspecified, computes the 2-norm of flatten(x).
-//         (None, None) => {
-//             let axes_ptr = std::ptr::null(); // mlx-c already handles the case where axes is null
-//             Array::try_from_op(|res| unsafe {
-//                 ironbark_mlx_sys::mlx_linalg_norm(
-//                     res,
-//                     array.as_ref().as_ptr(),
-//                     axes_ptr,
-//                     0,
-//                     keep_dims,
-//                     stream.as_ref().as_ptr(),
-//                 )
-//             })
-//         }
-//         // If axis is not provided but ord is, then x must be either 1D or 2D.
-//         //
-//         // Frobenius norm is only supported for matrices
-//         (Some(Ord::Str(ord)), None) => norm_ord_device(array, ord, axes, keep_dims, stream),
-//         (Some(Ord::P(p)), None) => norm_p_device(array, p, axes, keep_dims, stream),
-//         // If axis is provided, but ord is not, then the 2-norm (or Frobenius norm for matrices) is
-//         // computed along the given axes. At most 2 axes can be specified.
-//         (None, Some(axes)) => Array::try_from_op(|res| unsafe {
-//             ironbark_mlx_sys::mlx_linalg_norm(
-//                 res,
-//                 array.as_ref().as_ptr(),
-//                 axes.as_ptr(),
-//                 axes.len(),
-//                 keep_dims,
-//                 stream.as_ref().as_ptr(),
-//             )
-//         }),
-//         // If both axis and ord are provided, then the corresponding matrix or vector
-//         // norm is computed. At most 2 axes can be specified.
-//         (Some(Ord::Str(ord)), Some(axes)) => norm_ord_device(array, ord, axes, keep_dims, stream),
-//         (Some(Ord::P(p)), Some(axes)) => norm_p_device(array, p, axes, keep_dims, stream),
-//     }
-// }
-
 /// The QR factorization of the input matrix. Returns an error if the input is not valid.
 ///
 /// This function supports arrays with at least 2 dimensions. The matrices which are factorized are
@@ -777,7 +686,6 @@ mod tests {
         // Unsupported types returns error
         let a = Array::from_slice(&[0, 1], &[1, 2]);
         assert!(with_stream(stream.as_ref(), || svd(&a)).is_err());
-        // TODO: wait for random
     }
 
     #[test]
@@ -795,7 +703,6 @@ mod tests {
         // Unsupported types returns error
         let a = Array::from_slice(&[1, 2, 3, 4, 5, 6], &[2, 3]);
         assert!(with_stream(stream.as_ref(), || inv(&a)).is_err());
-        // TODO: wait for random
     }
 
     #[test]
@@ -817,7 +724,6 @@ mod tests {
         // Non-square returns error
         let a = Array::from_slice(&[1, 2, 3, 4, 5, 6], &[2, 3]);
         assert!(with_stream(stream.as_ref(), || cholesky(&a, None)).is_err());
-        // TODO: wait for random
     }
 
     // The unit test below is adapted from the python unit test `test_linalg.py/test_lu`

@@ -72,7 +72,7 @@ ironbark/
 | `ironbark-ffi` | C functions returning JSON, for Swift | `ironbark_open`, `ironbark_send`, … |
 | `ironbark-cli` | Developer tools | `ironbark download / pack / verify / gen / ppl / profile` |
 | `ironbark-mlx` | Safe Rust API over MLX for inference | `Array`, `ops`, `transforms`, `fast` |
-| `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS (CMake fetches MLX v0.32.2) | bindgen output; `src/docs_bindings.rs` for docs.rs |
+| `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS (CMake fetches MLX v0.32.4) | bindgen output; `src/docs_bindings.rs` for docs.rs |
 
 `ironbark-experts` knows nothing about MLX: it hands out pinned slots of a byte slab. `ironbark-engine` wraps that slab as one MLX array, so kernels read the slots in place.
 

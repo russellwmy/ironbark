@@ -32,10 +32,14 @@ set(MLX_BUILD_PYTHON_BINDINGS OFF)
 if(MLX_C_USE_SYSTEM_MLX)
   find_package(MLX REQUIRED)
 else()
+  # ironbark: one source dir per tag, so a new tag is a fresh checkout (updating one that
+  # the iOS patch below changed fails to restore the patch).
+  set(MLX_GIT_TAG v0.32.4)
   FetchContent_Declare(
     mlx
     GIT_REPOSITORY "https://github.com/ml-explore/mlx.git"
-    GIT_TAG v0.32.2
+    GIT_TAG ${MLX_GIT_TAG}
+    SOURCE_DIR ${CMAKE_BINARY_DIR}/_deps/mlx-src-${MLX_GIT_TAG}
     # ironbark: compile the Metal kernels with the iOS SDK when targeting iOS.
     PATCH_COMMAND ${CMAKE_COMMAND} -DMLX_METAL_SDK=${MLX_METAL_SDK} -P
                   ${CMAKE_CURRENT_LIST_DIR}/patch-mlx-ios.cmake)

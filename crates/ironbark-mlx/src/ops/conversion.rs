@@ -14,12 +14,6 @@ impl Array {
         Array::try_from_op(|res| unsafe { ironbark_mlx_sys::mlx_to_fp8(res, self.as_ptr(), stream.as_ref().as_ptr()) })
     }
 
-    /// Compatibility shim for [`to_fp8`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `to_fp8`")]
-    pub fn to_fp8_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.to_fp8())
-    }
-
     /// Convert an FP8 (E4M3) encoded array back to a floating point type.
     ///
     /// The input array should be a uint8 array containing FP8 E4M3 encoded values.
@@ -32,12 +26,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_from_fp8(res, self.as_ptr(), dtype.into(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`from_fp8`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `from_fp8`")]
-    pub fn from_fp8_device(&self, dtype: Dtype, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.from_fp8(dtype))
     }
 
     /// Create a new array with the contents converted to the given [ArrayElement] type.
@@ -59,24 +47,12 @@ impl Array {
         self.as_dtype(T::DTYPE)
     }
 
-    /// Compatibility shim for [`as_type`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `as_type`")]
-    pub fn as_type_device<T: ArrayElement>(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.as_type::<T>())
-    }
-
     /// Same as `as_type` but with a [`Dtype`] argument.
     pub fn as_dtype(&self, dtype: Dtype) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_astype(res, self.as_ptr(), dtype.into(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`as_dtype`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `as_dtype`")]
-    pub fn as_dtype_device(&self, dtype: Dtype, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.as_dtype(dtype))
     }
 
     /// View the array as a different type.
@@ -92,12 +68,6 @@ impl Array {
         self.view_dtype(T::DTYPE)
     }
 
-    /// Compatibility shim for [`view`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `view`")]
-    pub fn view_device<T: ArrayElement>(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.view::<T>())
-    }
-
     /// Same as `view` but with a [`Dtype`] argument.
     pub fn view_dtype(&self, dtype: Dtype) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -106,11 +76,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`view_dtype`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `view_dtype`")]
-    pub fn view_dtype_device(&self, dtype: Dtype, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.view_dtype(dtype))
-    }
 }
 
 /// Convert an array to FP8 (E4M3) format.

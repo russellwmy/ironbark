@@ -88,12 +88,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`diag`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `diag`")]
-    pub fn diag_device(&self, k: impl Into<Option<i32>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.diag(k))
-    }
-
     /// Return specified diagonals.
     ///
     /// If self is 2-D, then a 1-D array containing the diagonal at the given `offset` is returned.
@@ -127,18 +121,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`diagonal`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `diagonal`")]
-    pub fn diagonal_device(
-        &self,
-        offset: impl Into<Option<i32>>,
-        axis1: impl Into<Option<i32>>,
-        axis2: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.diagonal(offset, axis1, axis2))
-    }
-
     /// Perform the Walsh-Hadamard transform along the final axis.
     ///
     /// Supports sizes `n = m*2^k` for `m` in `(1, 12, 20, 28)` and `2^k <= 8192`
@@ -160,18 +142,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`hadamard_transform`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `hadamard_transform`"
-    )]
-    pub fn hadamard_transform_device(
-        &self,
-        scale: impl Into<Option<f32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.hadamard_transform(scale))
-    }
 }
 
 /// See [`Array::diag`]

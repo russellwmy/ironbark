@@ -119,18 +119,6 @@ impl Array {
         }
     }
 
-    /// Compatibility shim for [`cummax`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `cummax`")]
-    pub fn cummax_device(
-        &self,
-        axis: impl Into<Option<i32>>,
-        reverse: impl Into<Option<bool>>,
-        inclusive: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.cummax(axis, reverse, inclusive))
-    }
-
     /// Return the cumulative minimum of the elements along the given axis returning an error if the inputs are invalid.
     ///
     /// # Params
@@ -178,18 +166,6 @@ impl Array {
                 )
             }),
         }
-    }
-
-    /// Compatibility shim for [`cummin`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `cummin`")]
-    pub fn cummin_device(
-        &self,
-        axis: impl Into<Option<i32>>,
-        reverse: impl Into<Option<bool>>,
-        inclusive: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.cummin(axis, reverse, inclusive))
     }
 
     /// Return the cumulative product of the elements along the given axis returning an error if the inputs are invalid.
@@ -243,18 +219,6 @@ impl Array {
         }
     }
 
-    /// Compatibility shim for [`cumprod`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `cumprod`")]
-    pub fn cumprod_device(
-        &self,
-        axis: impl Into<Option<i32>>,
-        reverse: impl Into<Option<bool>>,
-        inclusive: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.cumprod(axis, reverse, inclusive))
-    }
-
     /// Return the cumulative sum of the elements along the given axis returning an error if the inputs are invalid.
     ///
     /// # Params
@@ -306,17 +270,6 @@ impl Array {
         }
     }
 
-    /// Compatibility shim for [`cumsum`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `cumsum`")]
-    pub fn cumsum_device(
-        &self,
-        axis: impl Into<Option<i32>>,
-        reverse: impl Into<Option<bool>>,
-        inclusive: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.cumsum(axis, reverse, inclusive))
-    }
 }
 
 /// See [`Array::cummax`]

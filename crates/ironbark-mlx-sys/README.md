@@ -1,6 +1,6 @@
 # ironbark-mlx-sys
 
-Rust bindings to the [mlx-c](https://github.com/ml-explore/mlx-c) API, generated with bindgen. The build compiles mlx-c and MLX v0.32.2 (fetched by CMake) for macOS or iOS.
+Rust bindings to the [mlx-c](https://github.com/ml-explore/mlx-c) API, generated with bindgen. The build compiles mlx-c and MLX v0.32.4 (fetched by CMake) for macOS or iOS.
 
 ## Contents
 
@@ -10,7 +10,7 @@ Rust bindings to the [mlx-c](https://github.com/ml-explore/mlx-c) API, generated
 
 ## iOS
 
-MLX 0.32.2 compiles its Metal kernels with `-sdk macosx`. For iOS targets (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) this crate changes that:
+MLX 0.32.4 compiles its Metal kernels with `-sdk macosx`. For iOS targets (`aarch64-apple-ios`, `aarch64-apple-ios-sim`) this crate changes that:
 
 | File | Change |
 |---|---|

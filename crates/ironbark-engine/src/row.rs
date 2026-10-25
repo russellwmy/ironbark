@@ -24,8 +24,9 @@
 //! ```
 //!
 //! Ported from DeepGrove's `maple.py` (deepgrove/maple-preview-2bit-mlx). The accumulation
-//! order and bf16 rounding points follow MLX 0.32 `quantized.h` (Apple, MIT), so results are
-//! bit-identical to `quantized_matmul` / `gather_qmm` on the expanded group layout.
+//! order and bf16 rounding points follow MLX 0.32.4 `quantized.h` (Apple, MIT; activation sums
+//! in fp32), so results are bit-identical to `quantized_matmul` / `gather_qmm` on the expanded
+//! group layout.
 
 use ironbark_mlx::ops::indexing::IndexOp;
 use ironbark_mlx::{Array, Dtype};
@@ -122,7 +123,7 @@ const QMV: &str = r"
         const device bfloat16_t* xx=xv+k+lid*16;
         float xt[16],sum=0;
         for(int i=0;i<16;i+=4) {
-            sum+=xx[i]+xx[i+1]+xx[i+2]+xx[i+3];
+            sum+=float(xx[i])+float(xx[i+1])+float(xx[i+2])+float(xx[i+3]);
             xt[i]=xx[i];xt[i+1]=xx[i+1]/4.0f;
             xt[i+2]=xx[i+2]/16.0f;xt[i+3]=xx[i+3]/64.0f;
         }
@@ -153,7 +154,7 @@ const UP_SWIGLU: &str = r"
         float xt[16];
         float sum=0;
         for(int i=0;i<16;i+=4) {
-            sum+=xx[i]+xx[i+1]+xx[i+2]+xx[i+3];
+            sum+=float(xx[i])+float(xx[i+1])+float(xx[i+2])+float(xx[i+3]);
             xt[i]=xx[i];xt[i+1]=xx[i+1]/4.0f;
             xt[i+2]=xx[i+2]/16.0f;xt[i+3]=xx[i+3]/64.0f;
         }

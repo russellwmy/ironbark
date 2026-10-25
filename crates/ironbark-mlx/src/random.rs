@@ -187,12 +187,6 @@ pub fn split(key: impl AsRef<Array>, num: i32) -> Result<(Array, Array)> {
     Ok((keys.try_index(0)?, keys.try_index(1)?))
 }
 
-/// Compatibility shim for [`split`].
-#[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `split`")]
-pub fn split_device(key: impl AsRef<Array>, num: i32, stream: impl AsRef<Stream>) -> Result<(Array, Array)> {
-    crate::with_stream(stream.as_ref(), || split(key, num))
-}
-
 /// Generate uniformly distributed random numbers.
 /// The values are sampled uniformly in the half-open interval `[lower, upper)`.
 /// The lower and upper bound can be scalars or arrays and must be broadcastable to `shape`.

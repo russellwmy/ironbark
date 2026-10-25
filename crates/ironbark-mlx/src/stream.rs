@@ -73,21 +73,6 @@ where
     with_stream(&stream, f)
 }
 
-/// Gets the thread-local scoped default stream.
-#[deprecated(since = "0.26.0", note = "use `thread_local_default_stream`")]
-pub fn task_local_default_stream() -> Option<Stream> {
-    thread_local_default_stream()
-}
-
-/// Uses a given default stream for the duration of `f`.
-#[deprecated(since = "0.26.0", note = "use `with_stream(&stream, f)`")]
-pub fn with_new_default_stream<F, T>(default_stream: Stream, f: F) -> T
-where
-    F: FnOnce() -> T,
-{
-    with_stream(&default_stream, f)
-}
-
 /// Parameter type for all MLX operations.
 ///
 /// Use this to control where operations are evaluated:
@@ -188,24 +173,6 @@ impl Stream {
     /// default stream if present.
     pub fn thread_local_or_gpu() -> Self {
         thread_local_default_stream().unwrap_or_else(Stream::gpu)
-    }
-
-    /// Returns the thread-local scoped stream or the default stream.
-    #[deprecated(since = "0.26.0", note = "use `Stream::thread_local_or_default`")]
-    pub fn task_local_or_default() -> Self {
-        Self::thread_local_or_default()
-    }
-
-    /// Returns the thread-local scoped stream or the CPU stream.
-    #[deprecated(since = "0.26.0", note = "use `Stream::thread_local_or_cpu`")]
-    pub fn task_local_or_cpu() -> Self {
-        Self::thread_local_or_cpu()
-    }
-
-    /// Returns the thread-local scoped stream or the GPU stream.
-    #[deprecated(since = "0.26.0", note = "use `Stream::thread_local_or_gpu`")]
-    pub fn task_local_or_gpu() -> Self {
-        Self::thread_local_or_gpu()
     }
 
     /// Create a new stream on the default device. Panics if fails.

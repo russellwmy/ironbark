@@ -100,17 +100,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`all_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `all_axes`")]
-    pub fn all_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.all_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::all_axes`] but only reduces over a single axis.
     pub fn all_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -125,29 +114,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`all_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `all_axis`")]
-    pub fn all_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.all_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::all_axes`] but reduces over all axes.
     pub fn all(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_all(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`all`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `all`")]
-    pub fn all_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.all(keep_dims))
     }
 
     /// A `product` reduction over the given axes returning an error if the axes are invalid.
@@ -180,17 +152,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`prod_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `prod_axes`")]
-    pub fn prod_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.prod_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::prod_axes`] but only reduces over a single axis.
     pub fn prod_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -205,29 +166,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`prod_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `prod_axis`")]
-    pub fn prod_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.prod_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::prod_axes`] but reduces over all axes.
     pub fn prod(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_prod(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`prod`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `prod`")]
-    pub fn prod_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.prod(keep_dims))
     }
 
     /// A `max` reduction over the given axes returning an error if the axes are invalid.
@@ -260,17 +204,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`max_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `max_axes`")]
-    pub fn max_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.max_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::max_axes`] but only reduces over a single axis.
     pub fn max_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -285,29 +218,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`max_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `max_axis`")]
-    pub fn max_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.max_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::max_axes`] but reduces over all axes.
     pub fn max(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_max(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`max`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `max`")]
-    pub fn max_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.max(keep_dims))
     }
 
     /// Sum reduce the array over the given axes returning an error if the axes are invalid.
@@ -340,17 +256,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`sum_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `sum_axes`")]
-    pub fn sum_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.sum_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::sum_axes`] but only reduces over a single axis.
     pub fn sum_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -365,29 +270,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`sum_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `sum_axis`")]
-    pub fn sum_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.sum_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::sum_axes`] but reduces over all axes.
     pub fn sum(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_sum(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`sum`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `sum`")]
-    pub fn sum_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.sum(keep_dims))
     }
 
     /// A `mean` reduction over the given axes returning an error if the axes are invalid.
@@ -421,17 +309,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`mean_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `mean_axes`")]
-    pub fn mean_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.mean_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::mean_axes`] but only reduces over a single axis.
     pub fn mean_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -446,29 +323,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`mean_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `mean_axis`")]
-    pub fn mean_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.mean_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::mean_axes`] but reduces over all axes.
     pub fn mean(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_mean(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`mean`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `mean`")]
-    pub fn mean_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.mean(keep_dims))
     }
 
     /// A `min` reduction over the given axes returning an error if the axes are invalid.
@@ -501,17 +361,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`min_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `min_axes`")]
-    pub fn min_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.min_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::min_axes`] but only reduces over a single axis.
     pub fn min_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -526,29 +375,12 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`min_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `min_axis`")]
-    pub fn min_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.min_axis(axis, keep_dims))
-    }
-
     /// Similar to [`Array::min_axes`] but reduces over all axes.
     pub fn min(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_min(res, self.as_ptr(), keep_dims.into().unwrap_or(false), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`min`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `min`")]
-    pub fn min_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.min(keep_dims))
     }
 
     /// Compute the variance(s) over the given axes returning an error if the axes are invalid.
@@ -578,18 +410,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`var_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `var_axes`")]
-    pub fn var_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        ddof: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.var_axes(axes, keep_dims, ddof))
-    }
-
     /// Similar to [`Array::var_axes`] but only reduces over a single axis.
     pub fn var_axis(
         &self,
@@ -610,18 +430,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`var_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `var_axis`")]
-    pub fn var_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        ddof: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.var_axis(axis, keep_dims, ddof))
-    }
-
     /// Similar to [`Array::var_axes`] but reduces over all axes.
     pub fn var(&self, keep_dims: impl Into<Option<bool>>, ddof: impl Into<Option<i32>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -634,17 +442,6 @@ impl Array {
                 stream.as_ref().as_ptr(),
             )
         })
-    }
-
-    /// Compatibility shim for [`var`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `var`")]
-    pub fn var_device(
-        &self,
-        keep_dims: impl Into<Option<bool>>,
-        ddof: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.var(keep_dims, ddof))
     }
 
     /// Compute the median over the given axes.
@@ -667,17 +464,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`median_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `median_axes`")]
-    pub fn median_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.median_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::median_axes`] but only reduces over a single axis.
     pub fn median_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -692,17 +478,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`median_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `median_axis`")]
-    pub fn median_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.median_axis(axis, keep_dims))
-    }
-
     /// Compute the median over all axes.
     pub fn median(&self, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -714,12 +489,6 @@ impl Array {
                 stream.as_ref().as_ptr(),
             )
         })
-    }
-
-    /// Compatibility shim for [`median`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `median`")]
-    pub fn median_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.median(keep_dims))
     }
 
     /// A `log-sum-exp` reduction over the given axes returning an error if the axes are invalid.
@@ -744,20 +513,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`logsumexp_axes`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `logsumexp_axes`"
-    )]
-    pub fn logsumexp_axes_device(
-        &self,
-        axes: &[i32],
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.logsumexp_axes(axes, keep_dims))
-    }
-
     /// Similar to [`Array::logsumexp_axes`] but only reduces over a single axis.
     pub fn logsumexp_axis(&self, axis: i32, keep_dims: impl Into<Option<bool>>) -> Result<Array> {
         let stream = Stream::thread_local_or_default();
@@ -770,20 +525,6 @@ impl Array {
                 stream.as_ref().as_ptr(),
             )
         })
-    }
-
-    /// Compatibility shim for [`logsumexp_axis`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `logsumexp_axis`"
-    )]
-    pub fn logsumexp_axis_device(
-        &self,
-        axis: i32,
-        keep_dims: impl Into<Option<bool>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.logsumexp_axis(axis, keep_dims))
     }
 
     /// Similar to [`Array::logsumexp_axes`] but reduces over all axes.
@@ -799,11 +540,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`logsumexp`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `logsumexp`")]
-    pub fn logsumexp_device(&self, keep_dims: impl Into<Option<bool>>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.logsumexp(keep_dims))
-    }
 }
 
 /// See [`Array::all_axes`]

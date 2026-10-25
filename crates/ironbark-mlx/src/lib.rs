@@ -11,7 +11,7 @@
 //!
 //! # Threading
 //!
-//! [`Array`] values may move between threads. MLX 0.32.2 keeps default streams per thread, so each
+//! [`Array`] values may move between threads. MLX 0.32.4 keeps default streams per thread, so each
 //! worker must perform operations through its own default or thread-local scoped override.
 //! [`Stream`] and compiled closures are thread-affine and cannot move or be shared across threads.
 //! The scoped Rust override is thread-local, not asynchronous task-local, and does not propagate

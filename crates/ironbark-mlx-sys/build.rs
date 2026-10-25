@@ -132,15 +132,9 @@ fn build_and_link_mlx_c() {
     // The C examples are removed from the vendored copy.
     config.define("MLX_C_BUILD_EXAMPLES", "OFF");
 
-    #[cfg(debug_assertions)]
-    {
-        config.define("CMAKE_BUILD_TYPE", "Debug");
-    }
-
-    #[cfg(not(debug_assertions))]
-    {
-        config.define("CMAKE_BUILD_TYPE", "Release");
-    }
+    // MLX is always built optimized and without debug info: a Debug build of it is several GB
+    // per target dir and far too slow to run, and nothing here debugs MLX itself.
+    config.profile("Release");
 
     config.define("MLX_BUILD_METAL", "OFF");
     config.define("MLX_BUILD_ACCELERATE", "OFF");
@@ -221,6 +215,10 @@ fn main() {
     build_and_link_mlx_c();
 
     let mlx_c_root = PathBuf::from("src/mlx-c");
+    // The MLX version (`GIT_TAG`) and its patch live in the CMake files: rebuild when they change.
+    for cmake in ["CMakeLists.txt", "patch-mlx-ios.cmake"] {
+        println!("cargo:rerun-if-changed={}", mlx_c_root.join(cmake).display());
+    }
     let headers = bindgen_config::discover_headers(&mlx_c_root).expect("Unable to discover headers");
     for header in &headers {
         let relative = bindgen_config::relative_header(&mlx_c_root, header).expect("Unable to record header");

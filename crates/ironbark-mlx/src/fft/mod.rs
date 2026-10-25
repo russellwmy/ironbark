@@ -2,8 +2,7 @@
 //!
 //! Unsuffixed functions are the canonical named `Result` paths and use the current thread's scoped
 //! stream or runtime default. Select an explicit stream or device with [`crate::with_stream`] or
-//! [`crate::with_device`]. The `_device` functions and generated operation macros are deprecated
-//! forwarding shims.
+//! [`crate::with_device`].
 //!
 //! N-dimensional transforms accept [`FftnOptions`]. Its default selects every axis at the input
 //! lengths, and correlated lengths and axes are validated before calling MLX.

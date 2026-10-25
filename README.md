@@ -168,7 +168,7 @@ A crates.io version can be yanked, not deleted. New crates are rate limited (a b
 
 ## Usage
 
-Needs Rust 1.99+, macOS or iOS on Apple Silicon, Xcode and CMake ([Getting started](#getting-started)). The first build downloads MLX v0.32.2 from GitHub and compiles it with its Metal kernels (about 15 min); iOS needs nothing extra.
+Needs Rust 1.99+, macOS or iOS on Apple Silicon, Xcode and CMake ([Getting started](#getting-started)). The first build downloads MLX v0.32.4 from GitHub and compiles it with its Metal kernels (about 15 min); iOS needs nothing extra.
 
 ```toml
 [dependencies]
@@ -426,7 +426,7 @@ When the app leaves the screen, close the session (iOS runs no GPU work off scre
 
 | Piece | Note |
 |---|---|
-| MLX for iOS | MLX 0.32.2 hardcodes `-sdk macosx` for its kernels; `ironbark-mlx-sys` patches it to `iphoneos`. The app targets iOS 26.2+ (Metal 4, for MLX's NAX prefill kernels; `IOS_MIN` in `ios/build.sh`); `ironbark-mlx-sys` alone defaults to iOS 18 |
+| MLX for iOS | MLX 0.32.4 hardcodes `-sdk macosx` for its kernels; `ironbark-mlx-sys` patches it to `iphoneos`. The app targets iOS 26.2+ (Metal 4, for MLX's NAX prefill kernels; `IOS_MIN` in `ios/build.sh`); `ironbark-mlx-sys` alone defaults to iOS 18 |
 | Metal kernels | `mlx.metallib` (136 MB) sits next to the app binary, where MLX looks first |
 | Memory | iOS limits the process footprint. MLX's cache of freed buffers held 2.5–3.5 GB of prefill temporaries (footprint 5.2 GB at 64 experts per layer); the plan caps it (0 or 256 MB), same speed |
 
@@ -524,7 +524,7 @@ ironbark/
 | `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
 | `ironbark-cli` | The `ironbark` binary: `download`, `pack`, `verify`, `gen`, `ppl`, `profile` (see [Commands](#commands)) |
 | `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
-| `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.2 and its Metal kernels for macOS and iOS |
+| `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.4 and its Metal kernels for macOS and iOS |
 
 ## License
 

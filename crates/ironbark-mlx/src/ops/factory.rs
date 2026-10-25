@@ -42,12 +42,6 @@ impl Array {
         zeros_dtype(shape, dtype)
     }
 
-    /// Compatibility shim for [`zeros`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `zeros`")]
-    pub fn zeros_device<T: ArrayElement>(shape: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::zeros::<T>(shape))
-    }
-
     /// Construct an array of ones returning an error if shape is invalid.
     ///
     /// # Params
@@ -63,12 +57,6 @@ impl Array {
     pub fn ones<T: ArrayElement>(shape: &[i32]) -> Result<Array> {
         let dtype = T::DTYPE;
         ones_dtype(shape, dtype)
-    }
-
-    /// Compatibility shim for [`ones`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `ones`")]
-    pub fn ones_device<T: ArrayElement>(shape: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::ones::<T>(shape))
     }
 
     /// Create an identity matrix or a general diagonal matrix returning an error if params are invalid.
@@ -91,17 +79,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_eye(res, n, m.unwrap_or(n), k.unwrap_or(0), T::DTYPE.into(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`eye`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `eye`")]
-    pub fn eye_device<T: ArrayElement>(
-        n: i32,
-        m: Option<i32>,
-        k: Option<i32>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::eye::<T>(n, m, k))
     }
 
     /// Construct an array with the given value returning an error if shape is invalid.
@@ -135,16 +112,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`full`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `full`")]
-    pub fn full_device<T: ArrayElement>(
-        shape: &[i32],
-        values: impl AsRef<Array>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::full::<T>(shape, values))
-    }
-
     /// Create a square identity matrix returning an error if params are invalid.
     ///
     /// # Params
@@ -163,12 +130,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_identity(res, n, T::DTYPE.into(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`identity`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `identity`")]
-    pub fn identity_device<T: ArrayElement>(n: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::identity::<T>(n))
     }
 
     /// Generates ranges of numbers.
@@ -204,62 +165,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`arange`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `arange`")]
-    pub fn arange_device<U, T>(
-        start: impl Into<Option<U>>,
-        stop: U,
-        step: impl Into<Option<U>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array>
-    where
-        U: NumCast,
-        T: ArrayElement,
-    {
-        crate::with_stream(stream.as_ref(), || Self::arange::<U, T>(start, stop, step))
-    }
-
-    /// Compatibility shim for [`linspace`] with endpoint inclusion.
-    #[deprecated(since = "0.26.0", note = "use `ops::linspace` with `LinspaceOptions`")]
-    pub fn linspace<U, T>(start: U, stop: U, count: impl Into<Option<i32>>) -> Result<Array>
-    where
-        U: NumCast,
-        T: ArrayElement,
-    {
-        linspace::<U, T>(
-            start,
-            stop,
-            LinspaceOptions {
-                count: count.into().unwrap_or(50),
-                endpoint: true,
-            },
-        )
-    }
-
-    /// Compatibility shim for [`linspace`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `ops::linspace`")]
-    pub fn linspace_device<U, T>(
-        start: U,
-        stop: U,
-        count: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array>
-    where
-        U: NumCast,
-        T: ArrayElement,
-    {
-        crate::with_stream(stream.as_ref(), || {
-            linspace::<U, T>(
-                start,
-                stop,
-                LinspaceOptions {
-                    count: count.into().unwrap_or(50),
-                    endpoint: true,
-                },
-            )
-        })
-    }
-
     /// Repeat an array along a specified axis returning an error if params are invalid.
     ///
     /// # Params
@@ -281,17 +186,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_repeat_axis(res, array.as_ptr(), count, axis, stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`repeat_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `repeat_axis`")]
-    pub fn repeat_axis_device<T: ArrayElement>(
-        array: Array,
-        count: i32,
-        axis: i32,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::repeat_axis::<T>(array, count, axis))
     }
 
     /// Repeat a flattened array along axis 0 returning an error if params are invalid.
@@ -316,12 +210,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`repeat`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `repeat`")]
-    pub fn repeat_device<T: ArrayElement>(array: Array, count: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::repeat::<T>(array, count))
-    }
-
     /// An array with ones at and below the given diagonal and zeros elsewhere.
     ///
     /// # Params
@@ -344,16 +232,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`tri`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `tri`")]
-    pub fn tri_device<T: ArrayElement>(
-        n: i32,
-        m: Option<i32>,
-        k: Option<i32>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || Self::tri::<T>(n, m, k))
-    }
 }
 
 /// See [`Array::zeros`]
@@ -676,9 +554,8 @@ mod tests {
     }
 
     #[test]
-    #[expect(deprecated, reason = "tests the deprecated Array::linspace")]
     fn test_linspace_int() {
-        let array = Array::linspace::<_, f32>(0, 50, None).unwrap();
+        let array = linspace::<_, f32>(0, 50, LinspaceOptions::default()).unwrap();
         assert_eq!(array.shape(), &[50]);
         assert_eq!(array.dtype(), Dtype::Float32);
 
@@ -689,9 +566,8 @@ mod tests {
     }
 
     #[test]
-    #[expect(deprecated, reason = "tests the deprecated Array::linspace")]
     fn test_linspace_float() {
-        let array = Array::linspace::<_, f32>(0., 50., None).unwrap();
+        let array = linspace::<_, f32>(0., 50., LinspaceOptions::default()).unwrap();
         assert_eq!(array.shape(), &[50]);
         assert_eq!(array.dtype(), Dtype::Float32);
 
@@ -702,12 +578,11 @@ mod tests {
     }
 
     #[test]
-    #[expect(deprecated, reason = "tests the deprecated Array::linspace")]
     fn test_linspace_try() {
-        let array = Array::linspace::<_, f32>(0, 50, None);
+        let array = linspace::<_, f32>(0, 50, LinspaceOptions::default());
         assert!(array.is_ok());
 
-        let array = Array::linspace::<_, f32>(0, 50, Some(-1));
+        let array = linspace::<_, f32>(0, 50, LinspaceOptions { count: -1, endpoint: true });
         assert!(array.is_err());
     }
 

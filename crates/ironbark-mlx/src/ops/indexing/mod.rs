@@ -417,12 +417,6 @@ impl Array {
         })
     }
 
-    /// Compatibility shim for [`take_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `take_axis`")]
-    pub fn take_axis_device(&self, indices: impl AsRef<Array>, axis: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.take_axis(indices, axis))
-    }
-
     /// Take elements from flattened 1-D array.
     ///
     /// # Params
@@ -433,12 +427,6 @@ impl Array {
         Array::try_from_op(|res| unsafe {
             ironbark_mlx_sys::mlx_take(res, self.as_ptr(), indices.as_ref().as_ptr(), stream.as_ref().as_ptr())
         })
-    }
-
-    /// Compatibility shim for [`take`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `take`")]
-    pub fn take_device(&self, indices: impl AsRef<Array>, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.take(indices))
     }
 
     /// Take values along an axis at the specified indices.
@@ -465,20 +453,6 @@ impl Array {
                 stream.as_ref().as_ptr(),
             )
         })
-    }
-
-    /// Compatibility shim for [`take_along_axis`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `take_along_axis`"
-    )]
-    pub fn take_along_axis_device(
-        &self,
-        indices: impl AsRef<Array>,
-        axis: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.take_along_axis(indices, axis))
     }
 
     /// Put values along an axis at the specified indices.
@@ -526,20 +500,6 @@ impl Array {
         }
     }
 
-    /// Compatibility shim for [`put_along_axis`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `put_along_axis`"
-    )]
-    pub fn put_along_axis_device(
-        &self,
-        indices: impl AsRef<Array>,
-        values: impl AsRef<Array>,
-        axis: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.put_along_axis(indices, values, axis))
-    }
 }
 
 /// Indices of the maximum values along the axis.

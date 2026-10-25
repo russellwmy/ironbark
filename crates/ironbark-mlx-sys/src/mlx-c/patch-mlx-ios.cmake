@@ -1,4 +1,4 @@
-# ironbark: MLX 0.32.2 hardcodes the macOS SDK when compiling its Metal kernels.
+# ironbark: MLX 0.32.4 hardcodes the macOS SDK when compiling its Metal kernels.
 # When MLX_METAL_SDK is iphoneos or iphonesimulator, compile them with that SDK
 # and probe the Metal version and SDK version from it (with a deployment target of iOS 26.2+
 # and Metal 4, MLX then builds its NAX kernels). Runs in the MLX source dir; idempotent.

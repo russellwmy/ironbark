@@ -33,12 +33,6 @@ impl Array {
             .map_err(Into::into)
     }
 
-    /// Compatibility shim for [`load_numpy`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `load_numpy`")]
-    pub fn load_numpy_device(path: impl AsRef<Path>, stream: impl AsRef<Stream>) -> Result<Array, IoError> {
-        crate::with_stream(stream.as_ref(), || Self::load_numpy(path))
-    }
-
     /// Load dictionary of ``MLXArray`` from a `safetensors` file.
     ///
     /// # Params
@@ -51,18 +45,6 @@ impl Array {
         let safetensors = SafeTensors::load_device(path.as_ref(), stream)?;
         let data = safetensors.data()?;
         Ok(data)
-    }
-
-    /// Compatibility shim for [`load_safetensors`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `load_safetensors`"
-    )]
-    pub fn load_safetensors_device(
-        path: impl AsRef<Path>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<HashMap<String, Array>, IoError> {
-        crate::with_stream(stream.as_ref(), || Self::load_safetensors(path))
     }
 
     /// Load dictionary of ``MLXArray`` and metadata `[String:String]` from a `safetensors` file.
@@ -81,19 +63,6 @@ impl Array {
         let metadata = safetensors.metadata()?;
 
         Ok((data, metadata))
-    }
-
-    /// Compatibility shim for [`load_safetensors_with_metadata`].
-    #[allow(clippy::type_complexity)]
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `load_safetensors_with_metadata`"
-    )]
-    pub fn load_safetensors_with_metadata_device(
-        path: impl AsRef<Path>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<(HashMap<String, Array>, HashMap<String, String>), IoError> {
-        crate::with_stream(stream.as_ref(), || Self::load_safetensors_with_metadata(path))
     }
 
     /// Save array to a binary file in `.npy`format.

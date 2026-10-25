@@ -1,4 +1,4 @@
-//! Function transforms: evaluation and compilation.
+//! Function transforms: evaluation, compilation and gradients.
 //!
 //! **WARN**: Because function transforms including compilation works on
 //! the computation graph, the user must ensure that all `Array`s are passed
@@ -12,6 +12,9 @@ use crate::{
 };
 
 pub mod compile;
+mod grad;
+
+pub use grad::{stop_gradient, value_and_grad};
 
 /// Evaluate an iterator of [`Array`]s.
 pub fn eval<'a>(outputs: impl IntoIterator<Item = &'a Array>) -> Result<()> {

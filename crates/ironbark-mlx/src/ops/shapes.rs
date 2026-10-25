@@ -94,24 +94,9 @@ impl Array {
         expand_dims(self, axis)
     }
 
-    /// Compatibility shim for [`expand_dims`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `expand_dims`")]
-    pub fn expand_dims_device(&self, axis: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.expand_dims(axis))
-    }
-
     /// See [`expand_dims_axes()`].
     pub fn expand_dims_axes(&self, axes: &[i32]) -> Result<Array> {
         expand_dims_axes(self, axes)
-    }
-
-    /// Compatibility shim for [`expand_dims_axes`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `expand_dims_axes`"
-    )]
-    pub fn expand_dims_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.expand_dims_axes(axes))
     }
 
     /// See [`flatten`].
@@ -119,26 +104,9 @@ impl Array {
         flatten(self, start_axis, end_axis)
     }
 
-    /// Compatibility shim for [`flatten`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `flatten`")]
-    pub fn flatten_device(
-        &self,
-        start_axis: impl Into<Option<i32>>,
-        end_axis: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.flatten(start_axis, end_axis))
-    }
-
     /// See [`reshape`].
     pub fn reshape(&self, shape: &[i32]) -> Result<Array> {
         reshape(self, shape)
-    }
-
-    /// Compatibility shim for [`reshape`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `reshape`")]
-    pub fn reshape_device(&self, shape: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.reshape(shape))
     }
 
     /// See [`squeeze_axes()`].
@@ -146,21 +114,9 @@ impl Array {
         squeeze_axes(self, axes)
     }
 
-    /// Compatibility shim for [`squeeze_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `squeeze_axes`")]
-    pub fn squeeze_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.squeeze_axes(axes))
-    }
-
     /// See [`squeeze()`].
     pub fn squeeze(&self) -> Result<Array> {
         squeeze(self)
-    }
-
-    /// Compatibility shim for [`squeeze`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `squeeze`")]
-    pub fn squeeze_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.squeeze())
     }
 
     /// See [`as_strided`]
@@ -173,27 +129,9 @@ impl Array {
         as_strided(self, shape, strides, offset)
     }
 
-    /// Compatibility shim for [`as_strided`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `as_strided`")]
-    pub fn as_strided_device<'a>(
-        &'a self,
-        shape: impl IntoOption<&'a [i32]>,
-        strides: impl IntoOption<&'a [i64]>,
-        offset: impl Into<Option<usize>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.as_strided(shape, strides, offset))
-    }
-
     /// See [`at_least_1d`]
     pub fn at_least_1d(&self) -> Result<Array> {
         at_least_1d(self)
-    }
-
-    /// Compatibility shim for [`at_least_1d`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_1d`")]
-    pub fn at_least_1d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.at_least_1d())
     }
 
     /// See [`at_least_2d`]
@@ -201,21 +139,9 @@ impl Array {
         at_least_2d(self)
     }
 
-    /// Compatibility shim for [`at_least_2d`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_2d`")]
-    pub fn at_least_2d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.at_least_2d())
-    }
-
     /// See [`at_least_3d`]
     pub fn at_least_3d(&self) -> Result<Array> {
         at_least_3d(self)
-    }
-
-    /// Compatibility shim for [`at_least_3d`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `at_least_3d`")]
-    pub fn at_least_3d_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.at_least_3d())
     }
 
     /// See [`move_axis`]
@@ -223,35 +149,9 @@ impl Array {
         move_axis(self, src, dst)
     }
 
-    /// Compatibility shim for [`move_axis`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `move_axis`")]
-    pub fn move_axis_device(&self, src: i32, dst: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.move_axis(src, dst))
-    }
-
     /// See [`split_at_indices`].
     pub fn split_at_indices(&self, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
         split_at_indices(self, indices, axis)
-    }
-
-    /// Compatibility alias for [`Array::split_at_indices`].
-    #[deprecated(since = "0.26.0", note = "renamed to `split_at_indices`")]
-    pub fn split_axis(&self, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
-        self.split_at_indices(indices, axis)
-    }
-
-    /// Compatibility shim for [`split_axis`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `split_at_indices`"
-    )]
-    pub fn split_axis_device(
-        &self,
-        indices: &[i32],
-        axis: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Vec<Array>> {
-        crate::with_stream(stream.as_ref(), || self.split_at_indices(indices, axis))
     }
 
     /// See [`split_equal`].
@@ -259,32 +159,9 @@ impl Array {
         split_equal(self, num_parts, axis)
     }
 
-    /// Compatibility alias for [`Array::split_equal`].
-    #[deprecated(since = "0.26.0", note = "renamed to `split_equal`")]
-    pub fn split(&self, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
-        self.split_equal(num_parts, axis)
-    }
-
-    /// Compatibility shim for [`split`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `split_equal`")]
-    pub fn split_device(
-        &self,
-        num_parts: i32,
-        axis: impl Into<Option<i32>>,
-        stream: impl AsRef<Stream>,
-    ) -> Result<Vec<Array>> {
-        crate::with_stream(stream.as_ref(), || self.split_equal(num_parts, axis))
-    }
-
     /// See [`swap_axes`]
     pub fn swap_axes(&self, axis1: i32, axis2: i32) -> Result<Array> {
         swap_axes(self, axis1, axis2)
-    }
-
-    /// Compatibility shim for [`swap_axes`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `swap_axes`")]
-    pub fn swap_axes_device(&self, axis1: i32, axis2: i32, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.swap_axes(axis1, axis2))
     }
 
     /// See [`transpose_axes`]
@@ -292,24 +169,9 @@ impl Array {
         transpose_axes(self, axes)
     }
 
-    /// Compatibility shim for [`transpose_axes`].
-    #[deprecated(
-        since = "0.26.0",
-        note = "use `with_stream` or `with_device` around `transpose_axes`"
-    )]
-    pub fn transpose_axes_device(&self, axes: &[i32], stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.transpose_axes(axes))
-    }
-
     /// See [`transpose`]
     pub fn transpose(&self) -> Result<Array> {
         transpose(self)
-    }
-
-    /// Compatibility shim for [`transpose`].
-    #[deprecated(since = "0.26.0", note = "use `with_stream` or `with_device` around `transpose`")]
-    pub fn transpose_device(&self, stream: impl AsRef<Stream>) -> Result<Array> {
-        crate::with_stream(stream.as_ref(), || self.transpose())
     }
 
     /// [`transpose_axes`] and unwrap the result.
@@ -435,12 +297,6 @@ pub fn concatenate(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     Array::try_from_op(|res| unsafe {
         ironbark_mlx_sys::mlx_concatenate_axis(res, c_arrays.as_ptr(), axis, stream.as_ref().as_ptr())
     })
-}
-
-/// Compatibility alias for [`concatenate`].
-#[deprecated(since = "0.26.0", note = "renamed to `concatenate`")]
-pub fn concatenate_axis(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
-    concatenate(arrays, axis)
 }
 
 /// Flatten the arrays and concatenate them. Use [`concatenate`] to concatenate along an axis.
@@ -712,12 +568,6 @@ pub fn split_at_indices(a: impl AsRef<Array>, indices: &[i32], axis: impl Into<O
     })
 }
 
-/// Compatibility alias for [`split_at_indices`].
-#[deprecated(since = "0.26.0", note = "renamed to `split_at_indices`")]
-pub fn split_sections(a: impl AsRef<Array>, indices: &[i32], axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
-    split_at_indices(a, indices, axis)
-}
-
 /// Split an array into equal parts along a given axis. Returns an error if the array cannot be
 /// split into equal parts.
 ///
@@ -741,12 +591,6 @@ pub fn split_equal(a: impl AsRef<Array>, num_parts: i32, axis: impl Into<Option<
     Vec::<Array>::try_from_op(|res| unsafe {
         ironbark_mlx_sys::mlx_split(res, a.as_ref().as_ptr(), num_parts, axis, stream.as_ref().as_ptr())
     })
-}
-
-/// Compatibility alias for [`split_equal`].
-#[deprecated(since = "0.26.0", note = "renamed to `split_equal`")]
-pub fn split(a: impl AsRef<Array>, num_parts: i32, axis: impl Into<Option<i32>>) -> Result<Vec<Array>> {
-    split_equal(a, num_parts, axis)
 }
 
 /// Number of padding values to add to the edges of each axis.
@@ -895,12 +739,6 @@ pub fn stack(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
     Array::try_from_op(|res| unsafe {
         ironbark_mlx_sys::mlx_stack_axis(res, c_vec.as_ptr(), axis, stream.as_ref().as_ptr())
     })
-}
-
-/// Compatibility alias for [`stack`].
-#[deprecated(since = "0.26.0", note = "renamed to `stack`")]
-pub fn stack_axis(arrays: &[impl AsRef<Array>], axis: i32) -> Result<Array> {
-    stack(arrays, axis)
 }
 
 /// Swap two axes of an array. Returns an error if the axes are invalid.

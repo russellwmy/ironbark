@@ -68,12 +68,17 @@ serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
+# Keep dev target dirs small: line tables only for workspace crates (backtraces), no debug
+# info for dependencies or build scripts.
 [profile.dev]
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
 opt-level = 2
+
+[profile.dev.build-override]
+debug = false
 
 [profile.release]
 debug = false

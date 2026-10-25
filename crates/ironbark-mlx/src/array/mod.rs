@@ -62,14 +62,12 @@ impl std::fmt::Display for Array {
 
 impl Drop for Array {
     fn drop(&mut self) {
-        // TODO: check memory leak with some tool?
-
         // Decrease the reference count
         unsafe { ironbark_mlx_sys::mlx_array_free(self.as_ptr()) };
     }
 }
 
-// SAFETY: MLX 0.32.2 supports moving array handles while operations use per-thread default streams.
+// SAFETY: MLX 0.32.4 supports moving array handles while operations use per-thread default streams.
 unsafe impl Send for Array {}
 
 impl Array {
@@ -348,21 +346,6 @@ impl Array {
         }
 
         Ok(T::array_item(self)?)
-    }
-
-    /// Compatibility alias for [`Array::item_cast`].
-    #[deprecated(since = "0.26.0", note = "use `item_cast` or `item_exact`")]
-    pub fn item<T: ArrayElement>(&self) -> T {
-        self.item_cast()
-    }
-
-    /// Compatibility alias for [`Array::try_item_cast`].
-    #[deprecated(since = "0.26.0", note = "use `try_item_cast` or `try_item_exact`")]
-    pub fn try_item<T: ArrayElement>(&self) -> crate::error::Result<T> {
-        self.try_item_cast().map_err(|error| match error {
-            ConversionError::Exception(error) => error,
-            error => crate::error::Exception::custom(error.to_string()),
-        })
     }
 
     /// Copy contiguous row-major array values without dtype conversion.
