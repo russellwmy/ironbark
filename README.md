@@ -1,21 +1,27 @@
 # ironbark
 
-Ternary MoE inference on Apple Silicon, in Rust. The target model is **Maple** (DeepGrove, 20B total / ~1B active, 256 experts top-8, ternary weights), run on the GPU through MLX. Goal: lowest RAM at usable speed ([DR-0001](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/0001-ternary-moe-streaming.md)).
+Ternary MoE inference on Apple Silicon, in Rust, run on the GPU through MLX. Goal: lowest RAM at usable speed ([DR-0001](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/0001-ternary-moe-streaming.md)).
 
-| Where | Setup | Decode | Peak memory |
-|---|---|---|---|
-| M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
-| M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
-| iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
-| iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
-| M1 Max | Qwen3.6-35B-A3B ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
-| iPhone 17 | Qwen3.6-35B-A3B, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
+| Model | Size | Layers | Experts | Weights |
+|---|---|---|---|---|
+| Qwen3.6-35B-A3B | 35B total / ~3B active | 40 (30 Gated DeltaNet, 10 attention) | 256 per layer, top-8 | Ternary experts, the rest 4-bit; text, images, tool calls |
+| Maple (DeepGrove) | 20B total / ~1B active | 24 | 256 per layer, top-8 | Ternary; text, tool calls |
 
-Greedy decode; M1 Max checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose). Conditions and all measurements: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md).
+| Model | Where | Setup | Decode | Peak memory |
+|---|---|---|---|---|
+| Qwen3.6-35B-A3B | M1 Max | Ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
+| Qwen3.6-35B-A3B | M1 Max | Ternary pack, 3 GB budget | 10.4–11.7 tok/s | 3.0 GB |
+| Qwen3.6-35B-A3B | iPhone 17 | Ternary pack, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
+| Maple | M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
+| Maple | iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
+| Maple | iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
 
-- Matches the reference: perplexity 67.8979 vs 67.8978 ([BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#checkpoint-vs-reference)).
-- Sized to the device: experts that don't fit the budget are streamed from SSD ([Memory budget](#memory-budget)).
-- Ships small: an app can download ~268 MB and fetch the 4 GB of experts on demand ([On-demand experts](#on-demand-experts)).
+Greedy decode; the Maple checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose). Conditions and all measurements: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md).
+
+- Runs a 35B MoE in a 3 GB budget on an iPhone: experts that don't fit are streamed from SSD ([Memory budget](#memory-budget)).
+- Qwen: images in chat (`Session::set_image`), tool calls, dynamic top-k on by default in the iOS app ([Dynamic top-k](#dynamic-top-k)).
+- Matches the reference on Maple: perplexity 67.8979 vs 67.8978 ([BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#checkpoint-vs-reference)).
+- Ships small: an app can download the non-expert weights and fetch the experts on demand (Maple: ~268 MB, then 4 GB; [On-demand experts](#on-demand-experts)).
 - Rust library, C API for iOS / macOS apps, and the `ironbark` CLI.
 
 More: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md) (measurements), [ARCHITECTURE.md](https://github.com/russellwmy/ironbark/blob/main/ARCHITECTURE.md) (design), [STYLE.md](https://github.com/russellwmy/ironbark/blob/main/STYLE.md) (code style), [docs/decisions](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/README.md) (decision records).
@@ -28,10 +34,11 @@ More: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARK
   - [Expert options](#expert-options)
   - [Examples](#examples)
   - [Qwen bundles](#qwen-bundles)
+  - [Maple checkpoints](#maple-checkpoints)
   - [Development](#development)
   - [Release](#release)
 - [Usage](#usage)
-  - [Chat](#chat) · [Options](#options) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server)
+  - [Chat](#chat) · [Options](#options) · [Images](#images) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server)
 - [Tool use](#tool-use)
 - [On-demand experts](#on-demand-experts)
   - [On-demand embedding](#on-demand-embedding)
@@ -54,25 +61,28 @@ Requirements:
 | Xcode + Metal toolchain | Compiles MLX's Metal kernels; Xcode 26: `xcodebuild -downloadComponent MetalToolchain` |
 | Rust via `rustup` | `rust-toolchain.toml` pins 1.99.0; `rustup` installs it on the first `cargo` call |
 | CMake | Builds MLX: `brew install cmake` |
-| Disk | ~5 GB checkpoint + 4.0 GB pack (`~/.ironbark/models`) + ~10 GB `target/` |
+| Disk | Qwen: 11.4 GB bundle + ~9 GB pack (`~/.ironbark/models`); Maple: ~5 GB checkpoint + 4.0 GB pack; ~10 GB `target/` |
 
 Steps:
 
 ```
  cargo build ──▶ download ──▶ pack ──▶ verify ──▶ gen
-  (~15 min,      (~5 GB,     (4.0 GB    (hashes,   (first
-   MLX once)      resumes)    pack)      records)   tokens)
+  (~15 min,      (11.4 GB,    (~20 s,    (hashes,   (first
+   MLX once)      resumes)    D/pack)    records)   tokens)
 ```
 
 ```bash
 git clone https://github.com/russellwmy/ironbark && cd ironbark
 cargo build --release                                 # first build compiles MLX, about 15 min
 B=target/release/ironbark
-$B download                                           # -> ~/.ironbark/models/maple-preview-2bit-mlx
-$B pack --model ~/.ironbark/models/maple-preview-2bit-mlx --out ~/.ironbark/models/maple
-$B verify ~/.ironbark/models/maple
-$B gen --model ~/.ironbark/models/maple --experts ~/.ironbark/models/maple --prompt "The capital of Germany is"
+D=~/.ironbark/models/qwen3.6-35b-a3b-ternary
+$B download russellwmy/qwen3.6-35b-a3b-ternary         # -> $D
+$B pack --model $D                                    # -> $D/pack
+$B verify $D/pack
+$B gen --model $D --chat --prompt "What is the capital of Germany?"
 ```
+
+For Maple instead: [Maple checkpoints](#maple-checkpoints).
 
 Models go to `~/.ironbark/models` unless you pass `--dir` or set `IRONBARK_MODELS`. Set `HF_TOKEN` for private repos. All commands and options: [Commands](#commands); the library: [Usage](#usage); the phone: [iOS](#ios).
 
@@ -96,7 +106,7 @@ Requirements and the short path: [Getting started](#getting-started). Every comm
 
 | Option | Default |
 |---|---|
-| `REPO` | `deepgrove/maple-preview-2bit-mlx` |
+| `REPO` | `deepgrove/maple-preview-2bit-mlx` (Maple); Qwen: `russellwmy/qwen3.6-35b-a3b-ternary` |
 | `--dir` | `$IRONBARK_MODELS`, else `~/.ironbark/models` |
 | `--name` | Repo name without the owner |
 | `--revision` | `main` |
@@ -122,13 +132,10 @@ For `gen` and `profile`:
 
 ```bash
 B=target/release/ironbark
-M=~/.ironbark/models/maple-preview-2bit-mlx   # from: $B download
-P=~/.ironbark/models/maple                    # a packed model: what the library and the phone use
-$B gen --model $M --prompt "The capital of Germany is" --gen 128
-$B pack --model $M --out $P                   # trit experts (4.0 GB) + other weights, tokenizer, manifest
-$B verify $P                                  # e.g. after copying
-$B gen --model $P --prompt "..." --experts $P             # sized to this machine
-$B gen --model $P --prompt "..." --experts $P --budget 2  # or to a 2 GB footprint
+D=~/.ironbark/models/qwen3.6-35b-a3b-ternary   # a packed bundle: what the library and the phone use
+$B gen --model $D --chat --prompt "..."                     # sized to this machine
+$B gen --model $D --chat --prompt "..." --budget 3          # or to a 3 GB footprint
+$B profile --model $D --budget 3                            # GPU time per part of a step
 ```
 
 To use the library from your own code, see [Usage](#usage).
@@ -158,7 +165,23 @@ $B gen  --model ~/.ironbark/models/qwen3.6-35b-a3b-ternary --chat --prompt "Hell
 | `gen` / `profile --model D`, `Session::open(D)` | Load `D/pack`; error if not packed yet |
 
 Packing Qwen3.6-35B-A3B takes about 20 s and 2.9 GB of memory. After a pack version change,
-run `pack` again: it rebuilds `D/pack` from the bundle.
+run `pack` again: it rebuilds `D/pack` from the bundle. `pack --vision-only` adds just the
+vision encoder (6-bit) to an existing pack.
+
+### Maple checkpoints
+
+Maple is published as a 2-bit MLX checkpoint; `pack` writes the streaming dir.
+
+```bash
+M=~/.ironbark/models/maple-preview-2bit-mlx   # from: $B download (the default repo)
+P=~/.ironbark/models/maple
+$B download
+$B gen --model $M --prompt "The capital of Germany is" --gen 128   # the checkpoint itself
+$B pack --model $M --out $P                   # trit experts (4.0 GB) + other weights, tokenizer, manifest
+$B verify $P                                  # e.g. after copying
+$B gen --model $P --prompt "..." --experts $P             # sized to this machine
+$B gen --model $P --prompt "..." --experts $P --budget 2  # or to a 2 GB footprint
+```
 
 ### Development
 
@@ -167,7 +190,7 @@ Toolchain pinned in `rust-toolchain.toml`; config in `rustfmt.toml`, `clippy.tom
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --release -- -D warnings
-IRONBARK_MODEL=$P cargo test --workspace --release -- --test-threads=1   # without IRONBARK_MODEL the model tests are skipped
+IRONBARK_MODEL=$D cargo test --workspace --release -- --test-threads=1   # without IRONBARK_MODEL the model tests are skipped
 cargo deny check
 ```
 
@@ -213,13 +236,13 @@ Install the CLI: `cargo install ironbark-cli` (binary `ironbark`). The C API (`i
                                      app runs the tools ──▶ tool_results(&[..]) ──▶ Reply …
 ```
 
-`dir` is a packed model (`ironbark pack`, see [Commands](#commands)).
+`dir` is a packed model or a packed Qwen bundle (`ironbark pack`, see [Commands](#commands)).
 
 ### Chat
 
 ```rust
 fn main() -> ironbark::Result<()> {
-    let mut s = ironbark::Session::open("maple", ironbark::Options::default())?; // sized to the device
+    let mut s = ironbark::Session::open("qwen3.6-35b-a3b-ternary", ironbark::Options::default())?; // sized to the device
     s.set_system(Some("Today is 2026-10-15."), &[]);
     for piece in s.chat("What is the capital of Germany?")? {
         print!("{}", piece?); // streamed as it decodes
@@ -243,6 +266,18 @@ fn main() -> ironbark::Result<()> {
 ```rust
 let opts = ironbark::Options { budget: Some(2_000_000_000), ..Default::default() }; // 2 GB footprint
 ```
+
+### Images
+
+Qwen only, and the pack needs its vision encoder. The image goes with the next user message.
+
+```rust
+let info = s.set_image(&rgb, width, height, ironbark::IMAGE_PIXELS)?; // RGB bytes; resized to ≤ 512 × 512
+println!("{} image tokens, encoded in {:.1} s", info.tokens, info.encode_s);
+let reply: String = s.chat("Describe this photo.")?.collect::<ironbark::Result<_>>()?;
+```
+
+C API: `ironbark_set_image`. iPhone 17: a 576 × 416 photo is 234 tokens, encoded in 0.6 s ([BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#qwen-on-the-iphone)).
 
 ### Tool calls
 
@@ -330,7 +365,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Tool use
 
-Maple's chat template (Hermes style) lists tools as JSON in the system turn; the model replies with `<tool_call>` blocks and gets results back as `<tool_response>` blocks. The library writes the turns and parses replies; the app runs the tools (search API keys stay in the app).
+Both chat templates list tools in the system turn and take results back as `<tool_response>` blocks. The library writes the turns and parses replies into the same `ToolCall` (name, JSON arguments); the app runs the tools (search API keys stay in the app).
+
+| Model | A call in the reply |
+|---|---|
+| Qwen3.6 | `<tool_call><function=name><parameter=arg>value</parameter>…</function></tool_call>` |
+| Maple (Hermes style) | `<tool_call>{"name": …, "arguments": {…}}</tool_call>` |
 
 ```
  set_system(Some("Today is …"), &tools) ──▶ chat("weather in Adelaide?") ──▶ <think>…</think><tool_call>{…}</tool_call>
@@ -340,7 +380,7 @@ Maple's chat template (Hermes style) lists tools as JSON in the system turn; the
 
 Code: [Usage → Tool calls](#tool-calls).
 
-| Case (Mac, trit pack, replies ≤ 1024 tokens, 2026-10-16) | Called | Answer |
+| Case (Maple, Mac, trit pack, replies ≤ 1024 tokens, 2026-10-16; Qwen3.6 passes the same 4 on the iPhone) | Called | Answer |
 |---|---|---|
 | Weather in Adelaide | `get_weather {"city": "Adelaide"}` | Uses the result |
 | 2026 Japanese GP winner | `web_search {"query": "2026 Formula 1 Japanese Grand Prix winner"}` | Uses the result |
@@ -356,11 +396,11 @@ Notes:
 - Reasoning can run long (a haiku spent 1024+ tokens counting syllables); cap reply tokens in the app.
 - `Session::send` takes a list of messages (`Message::User`, `Assistant`, `ToolResults`): after `reset`, it rebuilds a conversation from a transcript (earlier replies lose their reasoning, as in the template).
 - The iOS chat offers three tools it runs itself, with no API keys: `calculator` (on device), `get_weather` (Open-Meteo) and `wikipedia_search` (Wikipedia API). It answers up to 3 rounds of calls per message, shows each call and result, folds the reasoning away, and renders the answer's Markdown (headings, lists, quotes, code, tables). C API: `ironbark_set_system`, `ironbark_send`, `ironbark_parse`.
-- The model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17: Maple 4 of 4 at 21–23 tok/s, 2026-10-15; Qwen3.6 4 of 4 at 7–9 tok/s, 2026-10-27).
+- Maple's model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17: Qwen3.6 4 of 4 at 7–9 tok/s, 2026-10-27; Maple 4 of 4 at 21–23 tok/s, 2026-10-15).
 
 ## On-demand experts
 
-A model can ship without `experts.bin` (4 GB) and build it locally from a server. The fetcher (`ironbark-fetch`) is separate from the engine: it fills the file on its own (e.g. at first launch, before any model is loaded), and the engine only sees a `Records` source, so a record the router needs before it arrives is fetched at once.
+A model can ship without `experts.bin` (Maple: 4 GB) and build it locally from a server. The fetcher (`ironbark-fetch`) is separate from the engine: it fills the file on its own (e.g. at first launch, before any model is loaded), and the engine only sees a `Records` source, so a record the router needs before it arrives is fetched at once.
 
 ```
  app ──▶ Sparse::open(dir, fetch) ──▶ start(threads) ──▶ progress() … stop()      ironbark-fetch
@@ -386,11 +426,11 @@ A model can ship without `experts.bin` (4 GB) and build it locally from a server
 
 The dir needs every other file of the pack (incl. `experts.json`, `manifest.json`). A record is fetched once even if the engine and a fill thread want it at the same time; the engine goes first. When every record is present, `experts.present` is removed and the dir is a normal pack.
 
-Measured on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#on-demand-experts).
+Measured with Maple on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#on-demand-experts).
 
 ### On-demand embedding
 
-`embed.bin` (175 MB) can arrive the same way, so the first download is ~268 MB instead of ~435 MB. The manifest holds one hash per 64 KiB chunk (2,673 chunks). Before prefill or a decode step reads a token's row, the engine makes its three chunks (codes, scales, biases) present, fetching missing ones in parallel; the GPU then reads the mapped file as usual.
+`embed.bin` can arrive the same way (Maple: 175 MB, so the first download is ~268 MB instead of ~435 MB). The manifest holds one hash per 64 KiB chunk (2,673 chunks). Before prefill or a decode step reads a token's row, the engine makes its three chunks (codes, scales, biases) present, fetching missing ones in parallel; the GPU then reads the mapped file as usual.
 
 ```
  token ids ──▶ chunks of their rows ──▶ present? ──yes──▶ GPU reads the mapped embed.bin
@@ -407,11 +447,11 @@ Measured on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob
 
 While `embed.bin` is incomplete, decode reads each token back before queuing the next step (one sync per token). Start its background fill after the experts are in: during the first query, 4 embed fill threads competed with expert fetches and cost ~6 s.
 
-Measured on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#on-demand-embedding).
+Measured with Maple on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#on-demand-embedding).
 
 ## iOS
 
-`ironbark pack` writes a self-contained streaming dir: `experts.bin` (4.0 GB trit; 4.9 GB with `--two-bit`) plus the embedding as `embed.bin` (0.18 GB, memory-mapped), the rest of the checkpoint as `model.safetensors` (0.27 GB), `experts.json`, `manifest.json`, config and tokenizer. That dir is what goes on the phone.
+`ironbark pack` writes a self-contained streaming dir: `experts.bin`, the embedding as `embed.bin` (memory-mapped), the rest of the checkpoint as `model.safetensors`, `experts.json`, `manifest.json`, config and tokenizer. That dir is what goes on the phone: `D/pack` for Qwen3.6 (~9 GB); for Maple 4.0 GB of trit experts (4.9 GB with `--two-bit`), 0.18 GB embedding, 0.27 GB other weights.
 
 ### Use in an iOS app
 
@@ -470,14 +510,14 @@ When the app leaves the screen, close the session (iOS runs no GPU work off scre
 
 ### Bench app
 
-`ios/IronbarkBench` chats with Maple and benchmarks it on the phone.
+`ios/IronbarkBench` chats with the models in its Documents and benchmarks them on the phone. It opens Qwen when present (with Expert drop 0.08), else Maple.
 
 | Step | Command |
 |---|---|
-| Pack | `ironbark pack --model $M --out $P` (trit); add `--two-bit --out ~/.ironbark/models/maple-2bit` for the 2-bit pack |
+| Pack | Qwen: `ironbark pack --model $D`; Maple: `ironbark pack --model $M --out $P` (trit), add `--two-bit --out ~/.ironbark/models/maple-2bit` for the 2-bit pack |
 | Build app | `IRONBARK_TEAM=<Apple Team ID> ios/build.sh` (Rust for `aarch64-apple-ios`, iOS metallib, xcodegen, xcodebuild); `--install` installs on the connected iPhone and warns if the app's models are gone (an install can come with an empty data folder) |
-| Copy model | `xcrun devicectl device copy to --device $DEV --domain-type appDataContainer --domain-identifier dev.ironbark.bench --source $P --destination Documents/maple`; the 2-bit pack goes to `Documents/maple-2bit` |
-| Benchmark | Put the arguments in `auto.txt` (e.g. `-models maple,maple-2bit -budgets 0,2,1.5`), copy it like the model to `Documents/auto.txt`, then `xcrun devicectl device process launch --terminate-existing --device $DEV dev.ironbark.bench`; results go to `Documents/results.jsonl` (new each run). Don't pass `-auto` on the launch line: Xcode 26's `devicectl` reads it as its own options |
+| Copy model | `xcrun devicectl device copy to --device $DEV --domain-type appDataContainer --domain-identifier dev.ironbark.bench --source $D/pack --destination Documents/qwen3.6-35b-a3b-ternary` (a name starting with `qwen`); Maple: `--source $P --destination Documents/maple`, the 2-bit pack to `Documents/maple-2bit` |
+| Benchmark | Put the arguments in `auto.txt` (e.g. `-models qwen3.6-35b-a3b-ternary,maple -budgets 0,2,1.5`), copy it like the model to `Documents/auto.txt`, then `xcrun devicectl device process launch --terminate-existing --device $DEV dev.ironbark.bench`; results go to `Documents/results.jsonl` (new each run). Don't pass `-auto` on the launch line: Xcode 26's `devicectl` reads it as its own options |
 
 | Piece | Note |
 |---|---|
@@ -487,7 +527,17 @@ When the app leaves the screen, close the session (iOS runs no GPU work off scre
 
 ### Memory budget
 
-The model is sized to the device (`plan.rs`, `device.rs`). Budget = 3/8 of RAM, at most half the iOS app limit; `--budget GB` / `ironbark_open(dir, budget_bytes, 0, &err)` override it. Far from the app limit while on screen; the app frees the model when it leaves the screen (see [Off screen](#off-screen)). The expert cache gets what the rest leaves:
+The model is sized to the device (`plan.rs`, `device.rs`). Budget = 3/8 of RAM, at most half the iOS app limit; `--budget GB` / `ironbark_open(dir, budget_bytes, 0, &err)` override it. Far from the app limit while on screen; the app frees the model when it leaves the screen (see [Off screen](#off-screen)). The expert cache gets what the rest leaves.
+
+Qwen3.6 (measured):
+
+| Device | Budget | Experts per layer | Mode |
+|---|---|---|---|
+| iPhone 17 (8 GB) | 3.02 GB | 31 | streamed |
+| Mac, `--budget 3` | 3 GB | 18 | streamed |
+| 32+ GB Mac | default | 256 | all loaded once (7.55 GB expert cache, 10.2 GB peak) |
+
+Maple:
 
 ```
  peak = weights 0.27 GB + runtime 0.1 GB + KV(context) + prefill 0.25 GB + buffer cache (0 or 256 MB)
@@ -510,6 +560,8 @@ iOS runs no GPU work for an app off screen. When IronbarkBench leaves the screen
 Without a debugger connection (`devicectl` needs the developer disk image), install with `ios-deploy --bundle`, upload the arguments as `Documents/auto.txt` (`ios-deploy --upload auto.txt --to Documents/auto.txt`), open the app, and download `Documents/results.jsonl`.
 
 ## Design
+
+The section below is Maple's decode step. Qwen3.6 shares the expert path (router top-8 of 256, ternary experts in the slab, streamed the same way) over 40 layers: 30 Gated DeltaNet and 10 attention, the rest of its weights 4-bit.
 
 One token per step; the residual stream is carried as (h, hn) so every add + norm is one kernel:
 
@@ -551,7 +603,7 @@ ironbark/
 ├── STYLE.md            code style and checks
 ├── crates/
 │   ├── ironbark/           library: Session (open sized to the device, chat, tools)
-│   ├── ironbark-engine/    Maple decode on the GPU
+│   ├── ironbark-engine/    Qwen3.6 and Maple decode on the GPU
 │   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
 │   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
 │   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
@@ -573,7 +625,7 @@ ironbark/
 | Crate | What |
 |---|---|
 | `ironbark` | Library: `Session::open` sized to the device, chat and tool turns, `parse` for tool calls |
-| `ironbark-engine` | Loads `deepgrove/maple-preview-2bit-mlx` or a packed dir; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
+| `ironbark-engine` | Loads a packed dir (Qwen3.6 bundle or Maple pack) or `deepgrove/maple-preview-2bit-mlx`; Qwen3.6 vision encoder; one-token decode step on custom Metal kernels (`row.rs` ternary matvec, `fused.rs` norms / RoPE / router, via the MLX C API in `kernel.rs`) plus MLX attention; bit-exact with DeepGrove's `maple.py` |
 | `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
 | `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
 | `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
@@ -587,4 +639,5 @@ ironbark/
 |---|---|
 | ironbark code | MIT OR Apache-2.0, at your option ([LICENSE-MIT](https://github.com/russellwmy/ironbark/blob/main/LICENSE-MIT), [LICENSE-APACHE](https://github.com/russellwmy/ironbark/blob/main/LICENSE-APACHE)) |
 | `crates/ironbark-mlx*` | MIT OR Apache-2.0; based on mlx-rs 0.32 by the mlx-rs authors ([DR-0002](https://github.com/russellwmy/ironbark/blob/main/docs/decisions/0002-own-mlx-bindings.md)) |
+| Qwen3.6 weights (not in this repo) | Apache-2.0, Qwen team (Alibaba) |
 | Maple weights (not in this repo) | MIT, DeepGrove; `ironbark pack` copies its `LICENSE` into every pack |

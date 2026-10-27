@@ -1,11 +1,15 @@
 # Benchmarks
 
-Measured speed, memory and accuracy of ironbark on Apple Silicon. How the budget is planned: [Memory budget](README.md#memory-budget).
+Measured speed, memory and accuracy of ironbark on Apple Silicon, for Qwen3.6-35B-A3B and Maple. How the budget is planned: [Memory budget](README.md#memory-budget).
 
 ## Table of Contents
 
 - [Summary](#summary)
-- [Mac (M1 Max)](#mac-m1-max)
+- [Qwen3.6-35B-A3B](#qwen36-35b-a3b)
+  - [Qwen on the Mac](#qwen-on-the-mac)
+  - [Qwen on the iPhone](#qwen-on-the-iphone)
+- [Dynamic top-k](#dynamic-top-k)
+- [Maple](#maple)
   - [Checkpoint vs reference](#checkpoint-vs-reference)
   - [Prefill](#prefill)
   - [Streaming decode](#streaming-decode)
@@ -14,31 +18,72 @@ Measured speed, memory and accuracy of ironbark on Apple Silicon. How the budget
   - [Packs by budget](#packs-by-budget)
   - [On-demand experts](#on-demand-experts)
   - [On-demand embedding](#on-demand-embedding)
-- [iPhone 17](#iphone-17)
-  - [Dynamic top-k](#dynamic-top-k)
-- [Qwen3.6-35B-A3B](#qwen36-35b-a3b)
-  - [Qwen on the Mac](#qwen-on-the-mac)
-  - [Qwen on the iPhone](#qwen-on-the-iphone)
+  - [Maple on the iPhone](#maple-on-the-iphone)
 
 ## Summary
 
-| Where | Setup | Decode | Peak memory |
-|---|---|---|---|
-| M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
-| M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
-| iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
-| iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
-| M1 Max | Qwen3.6-35B-A3B ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
-| M1 Max | Qwen3.6-35B-A3B, 3 GB budget | 10.4–11.7 tok/s | 3.0 GB |
-| iPhone 17 | Qwen3.6-35B-A3B, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
+| Model | Where | Setup | Decode | Peak memory |
+|---|---|---|---|---|
+| Qwen3.6-35B-A3B | M1 Max | Ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
+| Qwen3.6-35B-A3B | M1 Max | Ternary pack, 3 GB budget | 10.4–11.7 tok/s | 3.0 GB |
+| Qwen3.6-35B-A3B | iPhone 17 | Ternary pack, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
+| Maple | M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
+| Maple | M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
+| Maple | iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
+| Maple | iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
 
-Greedy decode; M1 Max checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose).
+Greedy decode; the Maple checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose).
 
-## Mac (M1 Max)
+## Qwen3.6-35B-A3B
+
+256 experts per layer, top-8, 40 layers (30 Gated DeltaNet, 10 attention); ternary experts in a trit pack, the rest 4-bit. Prompts: the first 3,000 characters of `prompts/prose.txt` and `rust.txt`, tokenized by Qwen: 733 (prose) and 962 (Rust) tokens.
+
+### Qwen on the Mac
+
+M1 Max, `ironbark gen`, 128 decoded, 3 runs per row, measured 2026-10-27:
+
+| Budget | Experts per layer | Hit prose / Rust | Prefill | Decode prose / Rust | Peak |
+|---|---|---|---|---|---|
+| default (all experts, 7.55 GB cache) | 256 | 100% | 283–286 tok/s | **71.4–71.8 / 69.1–69.7 tok/s** | 9.9 / 10.2 GB |
+| 3 GB | 18 | 57 / 44% | 130–132 tok/s | **11.6–11.7 / 10.4–10.5 tok/s** | 2.9 / 3.0 GB |
+
+At 3 GB each token spends ~51 ms on the per-layer routing readback and makes 182 (prose) / 256 (Rust) expert loads. The CLI plans 18 experts per layer at 3 GB; the app plans 31 at its 3.02 GB device budget. The first prefill after a build is slower (155 tok/s, kernels compiling).
+
+### Qwen on the iPhone
+
+iPhone 17, device budget (3.02 GB), 31 experts per layer, measured 2026-10-27:
+
+| Case | Prefill | Decode |
+|---|---|---|
+| Prose / Rust, 128 decoded, 3 runs ([Dynamic top-k](#dynamic-top-k), off) | 45–59 tok/s | **7.4–7.6 / 5.6–6.0 tok/s** |
+| Photo (576 × 416, 234 image tokens, encoded in 0.6 s) + "Describe this photo.", 81 decoded | 41 tok/s | 11.5 tok/s |
+| Tool cases (`-tools 1024`): 4 of 4 pass | 10–46 tok/s | 7.3–9.3 tok/s |
+
+Load wait is 40–48 ms per token on prose and 64–73 ms on Rust: about a third of each token on prose and 40% on Rust.
+
+## Dynamic top-k
+
+Decode drops each token's expert choices whose share of its routing weight is under a threshold, keeping at least 3 (`Session::set_dynamic_k`, off by default; the app's Expert drop). iPhone 17, device budget (3.02 GB), prose and Rust prompts (Maple 747 / 887 tokens, Qwen 733 / 962), 128 decoded, 3 runs per row, measured 2026-10-27:
+
+| Model | Drop below | Experts per layer | Hit prose / Rust | Loads per token prose / Rust | Decode prose / Rust |
+|---|---|---|---|---|---|
+| Maple | off | 129 | 96 / 93% | 6.4 / 12.1 | **27.2–28.6 / 20.6–22.6 tok/s** |
+| Maple | 0.08 | 129 | 97 / 94% | 4.7 / 11.2 | **35.1–35.6 / 20.1–23.1 tok/s** |
+| Qwen3.6 | off | 31 | 80 / 70% | 59.4 / 92.3 | **7.4–7.6 / 5.6–6.0 tok/s** |
+| Qwen3.6 | 0.08 | 31 | 82 / 71% | 50.2 / 87.9 | **6.8–7.0 / 5.1–5.4 tok/s** |
+
+- Maple prose: 0.08 reads 27% fewer experts and decodes ~27% faster; Rust is within run-to-run noise.
+- The text changes: a 0.08 reply leaves the plain one after 75–85 characters (Qwen Rust: the same 128 tokens). Each setting gives the same text in every run.
+- Qwen: 0.08 reads 5–15% fewer experts but decodes 8–10% slower on the phone. Its app default (0.08) comes from the evals, not this speed.
+- Maple without dynamic top-k (27.2–28.6 tok/s prose) is below [Maple on the iPhone](#maple-on-the-iphone) (30.2–31.0, 2026-10-16), at the same 129 experts per layer and hit rate; its peak is 2.91 GB (was 2.79–2.85).
+
+## Maple
+
+DeepGrove's Maple: 20B total / ~1B active, 256 experts per layer, top-8, 24 layers, ternary weights. Measured on the M1 Max (64 GB) unless the heading says iPhone.
 
 ### Checkpoint vs reference
 
-M1 Max (64 GB), measured 2026-10-15. Prompts are the first 3,000 characters of `prompts/prose.txt` and `rust.txt` (746 and 887 tokens); the long prompt is 10,000 characters of prose (2,327 tokens). Decode = greedy tokens/s after a short prompt (256 tokens) and after the prose prompt (128 tokens). DeepGrove's numbers are from mlx-lm `stream_generate` with a 512-token prompt.
+Measured 2026-10-15. Prompts are the first 3,000 characters of `prompts/prose.txt` and `rust.txt` (746 and 887 tokens); the long prompt is 10,000 characters of prose (2,327 tokens). Decode = greedy tokens/s after a short prompt (256 tokens) and after the prose prompt (128 tokens). DeepGrove's numbers are from mlx-lm `stream_generate` with a 512-token prompt.
 
 | Engine | Decode, short | Decode, 746-token context | Peak GPU memory | Perplexity 400 / 1024 tok |
 |---|---|---|---|---|
@@ -173,7 +218,7 @@ Mac test, 2026-10-16 (M1 Max, 2 GB budget, 30 ms per fetch, 4 expert fill thread
 
 Output is the same as the local pack in every run. The first query's time goes to expert fetches, not the embedding.
 
-## iPhone 17
+### Maple on the iPhone
 
 iPhone 17 (A19, 8 GB RAM, app limit 6.44 GB with the increased-memory-limit entitlement), embedding mapped from `embed.bin`, measured 2026-10-16: 747-token prose and 887-token Rust prompts, 128 decoded, one run per row (device budget: 3 runs). Peak = footprint as iOS counts it, sampled every 1 ms. In brackets: before `embed.bin` (embedding loaded into memory, 2026-10-15).
 
@@ -206,46 +251,3 @@ Lookahead and FlashHead on the iPhone (trit, decode tok/s prose / Rust, 128 toke
 Lookahead 1 stays the default: more layers ahead read more (load wait 7.8 → 9.6 ms per token at the device budget) without more hits. FlashHead (`Session::set_flash_head`, off by default) changed the prose text after 50 characters, so its prose speed is not comparable; on the Rust prompt (same text) it was slower (24.0 vs 26.5). On the Mac it matched the exact head on Rust but missed the exact argmax on 2 of the first 40 prose tokens (the right token's cluster ranked ~1290th of 4748, outside the 512 probed).
 
 Phone vs M1 Max: GPU round trip 200–277 µs (two runs) vs 225 µs; uncached expert reads 1.0 / 1.6 GB/s (1 / 8 threads) vs 1.9 / 6.1 GB/s. Load wait is ~40% of a token at 2 GB; the rest is A19 compute.
-
-### Dynamic top-k
-
-Decode drops each token's expert choices whose share of its routing weight is under a threshold, keeping at least 3 (`Session::set_dynamic_k`, off by default; the app's Expert drop). iPhone 17, device budget (3.02 GB), prose and Rust prompts (Maple 747 / 887 tokens, Qwen 733 / 962), 128 decoded, 3 runs per row, measured 2026-10-27:
-
-| Model | Drop below | Experts per layer | Hit prose / Rust | Loads per token prose / Rust | Decode prose / Rust |
-|---|---|---|---|---|---|
-| Maple | off | 129 | 96 / 93% | 6.4 / 12.1 | **27.2–28.6 / 20.6–22.6 tok/s** |
-| Maple | 0.08 | 129 | 97 / 94% | 4.7 / 11.2 | **35.1–35.6 / 20.1–23.1 tok/s** |
-| Qwen3.6 | off | 31 | 80 / 70% | 59.4 / 92.3 | **7.4–7.6 / 5.6–6.0 tok/s** |
-| Qwen3.6 | 0.08 | 31 | 82 / 71% | 50.2 / 87.9 | **6.8–7.0 / 5.1–5.4 tok/s** |
-
-- Maple prose: 0.08 reads 27% fewer experts and decodes ~27% faster; Rust is within run-to-run noise.
-- The text changes: a 0.08 reply leaves the plain one after 75–85 characters (Qwen Rust: the same 128 tokens). Each setting gives the same text in every run.
-- Qwen: 0.08 reads 5–15% fewer experts but decodes 8–10% slower on the phone. Its app default (0.08) comes from the evals, not this speed.
-- Maple without dynamic top-k (27.2–28.6 tok/s prose) is below the table above (30.2–31.0, 2026-10-16), at the same 129 experts per layer and hit rate; its peak is 2.91 GB (was 2.79–2.85).
-
-## Qwen3.6-35B-A3B
-
-256 experts per layer, top-8, 40 layers (30 Gated DeltaNet, 10 attention); ternary experts in a trit pack, the rest 4-bit. Prompts as above, tokenized by Qwen: 733 (prose) and 962 (Rust) tokens.
-
-### Qwen on the Mac
-
-M1 Max, `ironbark gen`, 128 decoded, 3 runs per row, measured 2026-10-27:
-
-| Budget | Experts per layer | Hit prose / Rust | Prefill | Decode prose / Rust | Peak |
-|---|---|---|---|---|---|
-| default (all experts, 7.55 GB cache) | 256 | 100% | 283–286 tok/s | **71.4–71.8 / 69.1–69.7 tok/s** | 9.9 / 10.2 GB |
-| 3 GB | 18 | 57 / 44% | 130–132 tok/s | **11.6–11.7 / 10.4–10.5 tok/s** | 2.9 / 3.0 GB |
-
-At 3 GB each token spends ~51 ms on the per-layer routing readback and makes 182 (prose) / 256 (Rust) expert loads. The CLI plans 18 experts per layer at 3 GB; the app plans 31 at its 3.02 GB device budget. The first prefill after a build is slower (155 tok/s, kernels compiling).
-
-### Qwen on the iPhone
-
-iPhone 17, device budget (3.02 GB), 31 experts per layer, measured 2026-10-27:
-
-| Case | Prefill | Decode |
-|---|---|---|
-| Prose / Rust, 128 decoded, 3 runs (table above) | 45–59 tok/s | **7.4–7.6 / 5.6–6.0 tok/s** |
-| Photo (576 × 416, 234 image tokens, encoded in 0.6 s) + "Describe this photo.", 81 decoded | 41 tok/s | 11.5 tok/s |
-| Tool cases (`-tools 1024`): 4 of 4 pass | 10–46 tok/s | 7.3–9.3 tok/s |
-
-Load wait is 40–48 ms per token on prose and 64–73 ms on Rust: about a third of each token on prose and 40% on Rust.
