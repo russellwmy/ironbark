@@ -20,6 +20,7 @@
 //! next layer's predicted from this residual and prefetched). The DeltaNet recurrence is one
 //! Metal kernel launch per layer and forward ([`deltanet`]).
 
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -361,6 +362,42 @@ impl fmt::Debug for Snapshot {
     }
 }
 
+impl Snapshot {
+    /// Tokens in the saved caches.
+    #[must_use]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// The rotary position offset after an image ([`Model::snapshot_from`] takes it back).
+    #[must_use]
+    pub fn delta(&self) -> i64 {
+        self.delta
+    }
+
+    /// The caches by name, to save: `{layer}.k` / `{layer}.v` for full attention,
+    /// `{layer}.conv` / `{layer}.ssm` for DeltaNet; a cache not started yet is left out.
+    #[must_use]
+    pub fn arrays(&self) -> Vec<(String, Array)> {
+        let mut out = Vec::new();
+        for (i, state) in self.state.iter().enumerate() {
+            let named: [(&str, Option<&Array>); 2] = match state {
+                State::Kv { k, v } => [("k", k.as_ref()), ("v", v.as_ref())],
+                State::Delta(d) => {
+                    let (conv, ssm) = d.parts();
+                    [("conv", conv), ("ssm", ssm)]
+                }
+            };
+            for (name, array) in named {
+                if let Some(a) = array {
+                    out.push((format!("{i}.{name}"), a.clone()));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Qwen3.5 / 3.6 MoE on the GPU.
 pub struct Model {
     pub cfg: Config,
@@ -598,6 +635,34 @@ impl Model {
             pos: self.pos,
             delta: self.delta,
         }
+    }
+
+    /// A [`Snapshot`] of this model from its saved [`Snapshot::arrays`], at `pos` with
+    /// `delta`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a layer's caches are missing (`pos` > 0) or do not match this model.
+    pub fn snapshot_from(&self, arrays: &HashMap<String, Array>, pos: usize, delta: i64) -> Result<Snapshot> {
+        let get = |i: usize, name: &str| arrays.get(&format!("{i}.{name}")).cloned();
+        let mut state = Vec::with_capacity(self.state.len());
+        for (i, kind) in self.state.iter().enumerate() {
+            let s = match kind {
+                State::Kv { .. } => State::Kv {
+                    k: get(i, "k"),
+                    v: get(i, "v"),
+                },
+                State::Delta(_) => State::Delta(deltanet::State::from_parts(get(i, "conv"), get(i, "ssm"))),
+            };
+            if pos > 0 && s.arrays().len() != 2 {
+                return Err(Error::Format(format!("saved caches of layer {i} missing")));
+            }
+            state.push(s);
+        }
+        if arrays.len() != state.iter().map(|s| s.arrays().len()).sum::<usize>() {
+            return Err(Error::Format("saved caches of another model".into()));
+        }
+        Ok(Snapshot { state, pos, delta })
     }
 
     /// Return to a [`Snapshot`].

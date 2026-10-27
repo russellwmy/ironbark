@@ -135,6 +135,85 @@ fn read_samples_once_then_restore_them() {
     assert!(ironbark::parse(&snow).text.to_lowercase().contains("white"), "{snow}");
 }
 
+/// A file for a saved snapshot, removed first.
+fn snapshot_file(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("ironbark-{}-{name}.safetensors", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+#[test]
+fn saved_samples_load_in_a_new_session() {
+    let path = snapshot_file("samples");
+    let system = Some("Reply with the colour of the thing, one word.");
+    let samples = [
+        ironbark::Message::User("grass"),
+        ironbark::Message::Assistant("green"),
+        ironbark::Message::User("the sky"),
+        ironbark::Message::Assistant("blue"),
+    ];
+    let snow = {
+        let Some(mut s) = open(Options::default()) else { return };
+        s.set_system(system, &[]);
+        s.read(&samples).unwrap();
+        s.save(&path).unwrap();
+        s.set_thinking(false);
+        reply(&mut s, "snow")
+    };
+    let mut s = open(Options::default()).unwrap();
+    assert!(s.load(&path).unwrap(), "same model");
+    s.set_thinking(false);
+    assert_eq!(reply(&mut s, "snow"), snow);
+    // Only the message was read.
+    assert!(s.stats().prompt_tokens < 20, "{}", s.stats().prompt_tokens);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_saved_system_turn_stays_read_for_new_conversations() {
+    let path = snapshot_file("system");
+    let system = Some("You are terse. Today is 2026-10-15.");
+    let (first, full) = {
+        let Some(mut s) = open(Options::default()) else { return };
+        s.set_system(system, &[]);
+        assert!(s.read_system_cached(&path).unwrap() > 0);
+        assert_eq!(s.read_system_cached(&path).unwrap(), 0);
+        let first = reply(&mut s, "Name a primary colour. One word.");
+        (first, s.context())
+    };
+    let mut s = open(Options::default()).unwrap();
+    s.set_system(system, &[]);
+    assert_eq!(s.read_system_cached(&path).unwrap(), 0);
+    // A new conversation after the load still finds the system turn read.
+    s.reset();
+    assert_eq!(s.read_system().unwrap(), 0);
+    assert_eq!(reply(&mut s, "Name a primary colour. One word."), first);
+    assert_eq!(s.context(), full);
+    // Another system turn is read, and replaces the file.
+    s.set_system(Some("You are verbose."), &[]);
+    assert!(s.read_system_cached(&path).unwrap() > 0);
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn a_missing_file_does_not_load() {
+    let Some(mut s) = open(Options::default()) else { return };
+    assert!(!s.load(snapshot_file("missing")).unwrap());
+}
+
+#[test]
+fn a_broken_file_is_a_snapshot_error() {
+    let Some(mut s) = open(Options::default()) else { return };
+    let path = snapshot_file("broken");
+    std::fs::write(&path, b"not safetensors").unwrap();
+    assert!(matches!(s.load(&path), Err(ironbark::Error::Snapshot(_))));
+    // read_system_cached reads the system turn instead, and replaces the file.
+    s.set_system(Some("You are terse."), &[]);
+    assert!(s.read_system_cached(&path).unwrap() > 0);
+    assert!(s.load(&path).unwrap());
+    std::fs::remove_file(&path).unwrap();
+}
+
 #[test]
 fn without_thinking_a_reply_starts_after_its_reasoning() {
     let Some(mut s) = open(Options::default()) else { return };

@@ -1,5 +1,6 @@
-//! Run Maple (DeepGrove's 20B ternary MoE) on Apple Silicon (macOS, iOS) with its experts
-//! streamed from storage, sized to the device's memory.
+//! Run MoE models (Qwen3.5 / 3.6 MoE, e.g. Qwen3.6-35B-A3B, and DeepGrove's 20B ternary
+//! Maple) on Apple Silicon (macOS, iOS) with their experts streamed from storage, sized to the
+//! device's memory.
 //!
 //! A model is a dir written by `ironbark pack`. [`Session::open`] plans a memory budget for the
 //! device, loads the non-expert weights, and caches as many experts per layer as fit; the rest
@@ -8,7 +9,7 @@
 //!
 //! ```no_run
 //! # fn main() -> ironbark::Result<()> {
-//! let mut s = ironbark::Session::open("models/maple", ironbark::Options::default())?;
+//! let mut s = ironbark::Session::open("models/qwen3.6-35b-a3b", ironbark::Options::default())?;
 //! for piece in s.chat("What is the capital of Germany?")? {
 //!     print!("{}", piece?);
 //! }
@@ -23,6 +24,7 @@
 //!      └── plan: budget from the device -> experts per layer
 //! ```
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -76,6 +78,10 @@ pub enum Error {
     /// [`Session::next_piece`] without [`Session::start`].
     #[error("no reply started")]
     NoTurn,
+    /// A saved conversation ([`Session::save`]) cannot be written, read, or does not match the
+    /// model.
+    #[error("snapshot: {0}")]
+    Snapshot(String),
 }
 
 /// Result of this crate.
@@ -181,6 +187,9 @@ pub const IMAGE_PIXELS: usize = 512 * 512;
 /// Most system turns kept read ([`Session::set_system`]), so switching between them is cheap.
 const SYSTEM_KVS: usize = 4;
 
+/// Format of a saved conversation ([`Session::save`]); another one is not loaded.
+const SNAPSHOT_FORMAT: &str = "ironbark-snapshot-1";
+
 /// A saved conversation ([`Session::snapshot`]): its KV cache, its system turn, and how the
 /// next turn closes the last one.
 #[derive(Debug, Clone)]
@@ -239,6 +248,25 @@ pub struct Session {
     ids: Vec<u32>,
     /// The KV cache holds an image (its embeddings are gone after a GPU failure).
     image_read: bool,
+    /// What a saved snapshot must match to load ([`fingerprint`]).
+    fingerprint: String,
+}
+
+/// What a saved snapshot must match: this crate's version and the model's files (its
+/// manifest, else its config).
+fn fingerprint(dir: &Path) -> String {
+    let bytes = std::fs::read(dir.join("manifest.json"))
+        .or_else(|_| std::fs::read(dir.join("config.json")))
+        .unwrap_or_default();
+    // FNV-1a: the same in every build, unlike `DefaultHasher`.
+    let hash = bytes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+    format!("{}-{hash:016x}", env!("CARGO_PKG_VERSION"))
+}
+
+fn snapshot_err(e: impl std::fmt::Display) -> Error {
+    Error::Snapshot(e.to_string())
 }
 
 fn tok_err(e: impl std::fmt::Display) -> Error {
@@ -300,6 +328,7 @@ impl Session {
             sampler: Sampler::new(seed())?,
             ids: Vec::new(),
             image_read: false,
+            fingerprint: fingerprint(dir),
         })
     }
 
@@ -397,6 +426,120 @@ impl Session {
         self.close = Some(snapshot.close);
     }
 
+    /// Save the conversation to `path`, a `.safetensors` file, to [`Session::load`] in a later
+    /// session of the same model: e.g. few-shot samples read once (for the system turn alone,
+    /// [`Session::read_system_cached`]). Written to a temporary file, then renamed.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file cannot be written.
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.write_snapshot(&self.snapshot(), path.as_ref())
+    }
+
+    /// Return to a conversation saved by [`Session::save`], with its system turn; the next
+    /// message continues it. Returns false, changing nothing, when the file is missing or from
+    /// another model, ironbark version or format.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the file cannot be read, or its caches do not match the model.
+    pub fn load(&mut self, path: impl AsRef<Path>) -> Result<bool> {
+        let Some(snapshot) = self.read_snapshot(path.as_ref())? else {
+            return Ok(false);
+        };
+        self.restore(&snapshot);
+        Ok(true)
+    }
+
+    /// In a new conversation, put the system turn in the KV cache from `path` when it was
+    /// saved there, else read it ([`Session::read_system`]) and save it to `path` for the next
+    /// session. Call after [`Session::set_system`]. Returns the tokens read (0 when loaded or
+    /// restored, in a conversation, or without a system turn).
+    ///
+    /// A file that is missing, broken, or holds another model or system turn is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the system turn does not fit the context, the model fails, or the file cannot
+    /// be written.
+    pub fn read_system_cached(&mut self, path: impl AsRef<Path>) -> Result<usize> {
+        let path = path.as_ref();
+        let kept = self.system_kvs.iter().any(|(text, ..)| *text == self.system);
+        if self.chatting || self.system.is_empty() || kept {
+            return self.read_system();
+        }
+        if let Ok(Some(s)) = self.read_snapshot(path) {
+            let system_alone =
+                !s.chatting && s.system == self.system && self.encode(&s.system).is_ok_and(|ids| ids == s.ids);
+            if system_alone {
+                self.restore(&s);
+                self.keep_system(s.system, s.kv, s.ids);
+                return Ok(0);
+            }
+        }
+        let read = self.read_system()?;
+        self.save(path)?;
+        Ok(read)
+    }
+
+    /// Write `snapshot` to `path` ([`Session::save`]).
+    fn write_snapshot(&self, snapshot: &Snapshot, path: &Path) -> Result<()> {
+        let (arrays, pos, delta) = snapshot.kv.parts();
+        let meta: HashMap<String, String> = [
+            ("format", SNAPSHOT_FORMAT.to_owned()),
+            ("model", self.fingerprint.clone()),
+            ("ids", serde_json::to_string(&snapshot.ids).map_err(snapshot_err)?),
+            ("image", snapshot.image.to_string()),
+            ("context", snapshot.context.to_string()),
+            ("system", snapshot.system.clone()),
+            ("chatting", snapshot.chatting.to_string()),
+            ("close", snapshot.close.to_owned()),
+            ("pos", pos.to_string()),
+            ("delta", delta.to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        let tmp = path.with_extension("tmp.safetensors");
+        Array::save_safetensors(arrays.iter().map(|(name, a)| (name, a)), &meta, &tmp).map_err(snapshot_err)?;
+        std::fs::rename(&tmp, path).map_err(snapshot_err)?;
+        Ok(())
+    }
+
+    /// A snapshot written by [`Session::write_snapshot`], read into memory; `None` when the
+    /// file is missing or from another model, ironbark version or format.
+    fn read_snapshot(&self, path: &Path) -> Result<Option<Snapshot>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let (arrays, meta) = Array::load_safetensors_with_metadata(path).map_err(snapshot_err)?;
+        let get = |k: &str| meta.get(k).map_or("", String::as_str);
+        if get("format") != SNAPSHOT_FORMAT || get("model") != self.fingerprint {
+            return Ok(None);
+        }
+        let number = |k: &str| get(k).parse::<usize>().map_err(|_| snapshot_err(format!("bad {k}")));
+        let close = match get("close") {
+            "" => "",
+            "\n" => "\n",
+            "<|im_end|>\n" => "<|im_end|>\n",
+            _ => return Err(snapshot_err("bad close")),
+        };
+        let delta = get("delta").parse::<i64>().map_err(|_| snapshot_err("bad delta"))?;
+        let kv = self.model.cache_from(&arrays, number("pos")?, delta).map_err(snapshot_err)?;
+        // Read now, not when first used.
+        ironbark_mlx::transforms::eval(arrays.values())?;
+        Ok(Some(Snapshot {
+            kv,
+            ids: serde_json::from_str(get("ids")).map_err(snapshot_err)?,
+            image: get("image") == "true",
+            context: number("context")?,
+            system: get("system").to_owned(),
+            chatting: get("chatting") == "true",
+            close,
+        }))
+    }
+
     /// Read `messages` into the conversation (after the system turn in a new one) without a
     /// reply, e.g. few-shot samples to [`Session::snapshot`] once and restore for each
     /// question. Returns the tokens read.
@@ -415,6 +558,18 @@ impl Session {
         // The turns end with their end token and line break.
         self.close = Some("");
         Ok(read)
+    }
+
+    /// In a new conversation, read the system turn now (or restore it when read recently),
+    /// so the first message does not wait for it (to keep it across sessions,
+    /// [`Session::read_system_cached`]). Returns the tokens read (0 when restored, in a
+    /// conversation, or without a system turn).
+    ///
+    /// # Errors
+    ///
+    /// Fails if the system turn does not fit the context, or the model fails.
+    pub fn read_system(&mut self) -> Result<usize> {
+        Ok(self.open_system()?.0)
     }
 
     /// How the next turn closes the last one: nothing in a new conversation; its end token
@@ -451,11 +606,16 @@ impl Session {
         let tokens = self.start(&system, true)?;
         let read_s = self.turn.as_ref().map_or(0.0, |t| t.prefill_s);
         self.turn = None;
+        self.keep_system(system, self.model.snapshot(), self.ids.clone());
+        Ok((tokens, read_s))
+    }
+
+    /// Keep `system`'s KV cache and tokens as that turn read, dropping the oldest kept.
+    fn keep_system(&mut self, system: String, kv: Cache, ids: Vec<u32>) {
         if self.system_kvs.len() == SYSTEM_KVS {
             self.system_kvs.remove(0);
         }
-        self.system_kvs.push((system, self.model.snapshot(), self.ids.clone()));
-        Ok((tokens, read_s))
+        self.system_kvs.push((system, kv, ids));
     }
 
     /// Benchmark: from an empty context, read `prompt` and generate `tokens` tokens greedily,
@@ -543,7 +703,7 @@ impl Session {
         })
     }
 
-    /// Send `message` in the conversation (Maple's chat format) and stream the reply: its
+    /// Send `message` in the conversation (the model's chat format) and stream the reply: its
     /// reasoning, `</think>`, then the answer or tool calls ([`parse`] splits them).
     ///
     /// # Errors

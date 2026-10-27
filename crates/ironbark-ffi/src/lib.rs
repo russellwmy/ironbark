@@ -7,6 +7,7 @@
 //! ```text
 //!   Swift app ──▶ ironbark_open(dir, budget, slots) ──▶ ironbark_start(text, reset) ──▶ ironbark_next … ──▶ ironbark_stats
 //!             ──▶ ironbark_set_system(system, tools) ──▶ ironbark_send(messages, reset) ──▶ ironbark_next …
+//!             ──▶ ironbark_read_system_cached(path) / ironbark_save(path) / ironbark_load(path)
 //!             ──▶ ironbark_parse(reply) ──▶ JSON reasoning, answer, tool calls
 //!             ──▶ ironbark_generate(prompt, n) ──▶ JSON timings, stats, text
 //!             ──▶ ironbark_probe(dir) ──▶ JSON GPU round trip, storage reads, memory
@@ -687,6 +688,103 @@ pub unsafe extern "C" fn ironbark_set_flash_head(s: *mut Session, on: bool) -> *
     })
 }
 
+/// How next tokens are chosen: `sampling` is a JSON object of `temperature`, `top_k`, `top_p`
+/// and `presence_penalty`, each optional (missing: the model's own); null: the model's own
+/// (greedy for Maple, Qwen's recommended settings). Returns the settings now in use.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently; `sampling` is null or a
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_set_sampling(s: *mut Session, sampling: *const c_char) -> *mut c_char {
+    // SAFETY: forwarded from this function's contract.
+    let sampling = unsafe { opt_str_arg(sampling) };
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    let s = unsafe { s.as_mut() };
+    report(|| {
+        let s = &mut s.ok_or("null session")?.0;
+        s.set_sampling(None);
+        if let Some(text) = sampling? {
+            let v: Value = serde_json::from_str(text).map_err(|e| format!("sampling: {e}"))?;
+            let mut x = s.sampling();
+            let float = |k: &str, d: f32| v.get(k).and_then(Value::as_f64).map_or(d, |f| f as f32);
+            x.temperature = float("temperature", x.temperature);
+            x.top_p = float("top_p", x.top_p);
+            x.presence_penalty = float("presence_penalty", x.presence_penalty);
+            x.top_k = v.get("top_k").and_then(Value::as_u64).map_or(x.top_k, |k| k as usize);
+            s.set_sampling(Some(x));
+        }
+        let x = s.sampling();
+        Ok(json!({
+            "temperature": x.temperature,
+            "top_k": x.top_k,
+            "top_p": x.top_p,
+            "presence_penalty": x.presence_penalty,
+        }))
+    })
+}
+
+/// In a new conversation, put the system turn ([`ironbark_set_system`]) in the KV cache from
+/// the file at `path` when it was saved there, else read it and save it to `path` for the next
+/// session. Returns `{"read": tokens}` (0: loaded, restored or not needed).
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently; `path` is a NUL-terminated
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_read_system_cached(s: *mut Session, path: *const c_char) -> *mut c_char {
+    // SAFETY: forwarded from this function's contract.
+    let path = unsafe { str_arg(path) };
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    let s = unsafe { s.as_mut() };
+    report(|| {
+        let s = &mut s.ok_or("null session")?.0;
+        Ok(json!({ "read": s.read_system_cached(path?).map_err(|e| e.to_string())? }))
+    })
+}
+
+/// Save the conversation to `path` (a `.safetensors` file), to [`ironbark_load`] in a later
+/// session of the same model. Returns `{}`.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently; `path` is a NUL-terminated
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_save(s: *mut Session, path: *const c_char) -> *mut c_char {
+    // SAFETY: forwarded from this function's contract.
+    let path = unsafe { str_arg(path) };
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    let s = unsafe { s.as_ref() };
+    report(|| {
+        let s = &s.ok_or("null session")?.0;
+        s.save(path?).map_err(|e| e.to_string())?;
+        Ok(json!({}))
+    })
+}
+
+/// Return to a conversation saved by [`ironbark_save`], with its system turn; the next
+/// message continues it. Returns `{"loaded": bool}` (false, changing nothing: the file is
+/// missing or from another model or ironbark version).
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently; `path` is a NUL-terminated
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_load(s: *mut Session, path: *const c_char) -> *mut c_char {
+    // SAFETY: forwarded from this function's contract.
+    let path = unsafe { str_arg(path) };
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    let s = unsafe { s.as_mut() };
+    report(|| {
+        let s = &mut s.ok_or("null session")?.0;
+        Ok(json!({ "loaded": s.load(path?).map_err(|e| e.to_string())? }))
+    })
+}
+
 /// Read `messages` into the conversation (`reset` first forgets it, so a transcript can be
 /// rebuilt) and open the model's reply; stream it with [`ironbark_next`]. `messages` is a JSON
 /// array of `{"role": "user" | "assistant", "content": text}` and `{"role": "tool", "content":
@@ -764,6 +862,19 @@ pub unsafe extern "C" fn ironbark_set_image(
         let i = s.set_image(bytes, w, h, max).map_err(|e| e.to_string())?;
         Ok(json!({ "tokens": i.tokens, "width": i.width, "height": i.height, "encode_s": i.encode_s }))
     })
+}
+
+/// Drop an image set with [`ironbark_set_image`] and not sent yet.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_clear_image(s: *mut Session) {
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    if let Some(s) = unsafe { s.as_mut() } {
+        s.0.clear_image();
+    }
 }
 
 /// Split a reply into its reasoning, its answer and its tool calls. Returns JSON `thinking`,

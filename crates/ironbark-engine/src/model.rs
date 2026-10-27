@@ -228,6 +228,29 @@ impl fmt::Debug for KvSnapshot {
     }
 }
 
+impl KvSnapshot {
+    /// Tokens in the saved cache.
+    #[must_use]
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// The cache by name, to save: `{layer}.k` and `{layer}.v`; a layer not started yet is
+    /// left out.
+    #[must_use]
+    pub fn arrays(&self) -> Vec<(String, Array)> {
+        let mut out = Vec::new();
+        for (i, kv) in self.kv.iter().enumerate() {
+            for (name, array) in [("k", &kv.k), ("v", &kv.v)] {
+                if let Some(a) = array {
+                    out.push((format!("{i}.{name}"), a.clone()));
+                }
+            }
+        }
+        out
+    }
+}
+
 /// Maple on the GPU.
 pub struct Model {
     /// Hyperparameters.
@@ -601,6 +624,26 @@ impl Model {
             kv: self.kv.clone(),
             pos: self.pos,
         }
+    }
+
+    /// A [`KvSnapshot`] of this model from its saved [`KvSnapshot::arrays`], at `pos`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a layer's cache is missing (`pos` > 0) or does not match this model.
+    pub fn snapshot_from(&self, arrays: &HashMap<String, Array>, pos: usize) -> Result<KvSnapshot> {
+        let get = |i: usize, name: &str| arrays.get(&format!("{i}.{name}")).cloned();
+        let kv: Vec<Kv> = (0..self.kv.len())
+            .map(|i| Kv {
+                k: get(i, "k"),
+                v: get(i, "v"),
+            })
+            .collect();
+        let held: usize = kv.iter().map(|l| usize::from(l.k.is_some()) + usize::from(l.v.is_some())).sum();
+        if (pos > 0 && held != 2 * kv.len()) || held != arrays.len() {
+            return Err(Error::Format("saved caches of another model".into()));
+        }
+        Ok(KvSnapshot { kv, pos })
     }
 
     /// Return the KV cache to `s`, taken from this model.

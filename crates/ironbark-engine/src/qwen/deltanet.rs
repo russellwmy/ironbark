@@ -109,6 +109,16 @@ impl State {
         [&self.conv, &self.ssm].into_iter().flatten().collect()
     }
 
+    /// The conv and recurrent caches, to save ([`State::from_parts`]).
+    pub(crate) fn parts(&self) -> (Option<&Array>, Option<&Array>) {
+        (self.conv.as_ref(), self.ssm.as_ref())
+    }
+
+    /// A state from saved [`State::parts`].
+    pub(crate) fn from_parts(conv: Option<Array>, ssm: Option<Array>) -> Self {
+        Self { conv, ssm }
+    }
+
     /// Single sequences' states (each past its first token) stacked a row per sequence.
     pub(crate) fn stack(rows: &[&Self]) -> Result<Self> {
         let cat = |get: fn(&Self) -> Option<&Array>| -> Result<Array> {

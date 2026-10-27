@@ -79,12 +79,24 @@ char *ironbark_set_system(IronbarkSession *s, const char *system, const char *to
  * conversation, `reset` first forgets it (to rebuild a transcript); then stream the reply
  * with ironbark_next. Returns the turn's stats. */
 char *ironbark_send(IronbarkSession *s, const char *messages, bool reset);
+/* Keep a long prompt read across sessions (files are .safetensors; a file of another model or
+ * ironbark version is not used).
+ * ironbark_read_system_cached: in a new conversation, load the system turn from `path`, else
+ * read it and save it there. Returns {read: tokens} (0: loaded, restored or not needed).
+ * ironbark_save: save the conversation to `path`. Returns {}.
+ * ironbark_load: return to a conversation saved at `path`. Returns {loaded: bool} (false:
+ * missing or of another model; nothing changes). */
+char *ironbark_read_system_cached(IronbarkSession *s, const char *path);
+char *ironbark_save(IronbarkSession *s, const char *path);
+char *ironbark_load(IronbarkSession *s, const char *path);
 /* Qwen: encode an image for the next ironbark_send, shown before its last user message's text.
  * `rgb` is `height` rows of `width` RGB pixels (3 bytes each, top to bottom), resized to at most
  * `max_pixels` (0: 512 x 512). The vision encoder loads for this and is freed after. Returns
  * {tokens, width, height, encode_s} (resized size). */
 char *ironbark_set_image(IronbarkSession *s, const uint8_t *rgb, uint32_t width, uint32_t height,
                          uint32_t max_pixels);
+/* Drop an image set with ironbark_set_image and not sent yet. */
+void ironbark_clear_image(IronbarkSession *s);
 /* Whether replies reason first (default on). Off, a reply to a user message answers at once
  * and starts with "</think>"; replies to tool results still reason. The system turn is read
  * once per session and restored for each new conversation. */
@@ -98,6 +110,10 @@ void ironbark_reset_gpu(void);
 /* Whether replies may call tools (default true). Off, the model cannot start a <tool_call> and
  * answers with what it has. */
 void ironbark_set_tool_calls(IronbarkSession *s, bool on);
+/* How next tokens are chosen: JSON {temperature, top_k, top_p, presence_penalty}, each
+ * optional (missing: the model's own); NULL: the model's own (greedy for Maple, Qwen's
+ * recommended settings). Returns the settings now in use. */
+char *ironbark_set_sampling(IronbarkSession *s, const char *sampling);
 /* Dynamic top-k: decode drops each token's expert choices whose share of its routing weight is
  * under drop_below (0: off, the default), keeping at least min_k. Fewer expert reads per token.
  * Every model (Qwen, Maple); returns true. */

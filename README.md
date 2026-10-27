@@ -311,6 +311,21 @@ for _ in 0..3 {                                     // cap the rounds of calls
 | `s.stats()` | Prompt / reply tokens, prefill and decode tok/s, expert hits, footprint |
 | `s.set_lookahead(n)` | Layers of experts prefetched ahead (default 1) |
 | `s.set_dynamic_k(Dynamic { drop_below: 0.08, ..Dynamic::default() })` | Decode drops each token's expert choices under that share of its routing weight, keeping at least 3 (default off); fewer expert reads, different text ([Dynamic top-k](#dynamic-top-k)) |
+| `s.read_system()` | Read the system turn now (restored when read recently), so the first message does not wait for it |
+| `s.read_system_cached("sys.safetensors")` | Same, kept across sessions: load the system turn from the file, else read it and save the file |
+| `s.snapshot()` / `s.restore(&snap)` | Save and return to a conversation in memory (cheap: arrays shared) |
+| `s.save("x.safetensors")` / `s.load(path)` | Save and return to a conversation across sessions: its caches as safetensors, with the token ids, system turn and a model fingerprint (ironbark version + `manifest.json`). `load` returns false when the file is missing or from another model or version |
+
+A long prompt read once (a system turn with tools, few-shot samples) loads from a file
+instead of being read again after the model reopens; on a phone, where a cold prompt reads at
+45–59 tok/s, that is the difference between seconds and a minute. Qwen3.6 files hold ~63 MB of
+fixed DeltaNet state plus the full-attention KV (2,000 tokens: ~100 MB).
+
+```
+ system turn:  set_system ─▶ read_system_cached(file)     first run: read + save; later: load
+ samples:      load(file) ─▶ false ─▶ read(samples) ─▶ save(file)
+                         └─▶ true: samples already read
+```
 
 ### Dynamic top-k
 

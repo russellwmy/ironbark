@@ -6,6 +6,7 @@
 //!           └─▶ Engine::Qwen(qwen::Model)     Qwen3.5 / 3.6 MoE (pack, or MLX checkpoint, resident)
 //! ```
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,6 +34,16 @@ pub(crate) enum Engine {
 pub(crate) enum Cache {
     Maple(KvSnapshot),
     Qwen(qwen::Snapshot),
+}
+
+impl Cache {
+    /// The caches by name, the position and the rotary offset (Maple: 0), to save.
+    pub(crate) fn parts(&self) -> (Vec<(String, Array)>, usize, i64) {
+        match self {
+            Cache::Maple(c) => (c.arrays(), c.pos(), 0),
+            Cache::Qwen(c) => (c.arrays(), c.pos(), c.delta()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Engine {
@@ -98,6 +109,14 @@ impl Engine {
 
     pub(crate) fn is_qwen(&self) -> bool {
         matches!(self, Engine::Qwen(_))
+    }
+
+    /// Caches of this engine from saved [`Cache::parts`].
+    pub(crate) fn cache_from(&self, arrays: &HashMap<String, Array>, pos: usize, delta: i64) -> Result<Cache> {
+        Ok(match self {
+            Engine::Maple(m) => Cache::Maple(m.snapshot_from(arrays, pos)?),
+            Engine::Qwen(m) => Cache::Qwen(m.snapshot_from(arrays, pos, delta)?),
+        })
     }
 
     /// Tokens in the caches.
