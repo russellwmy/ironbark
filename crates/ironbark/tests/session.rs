@@ -2,20 +2,21 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
-use ironbark::{Error, Finish, Options, Session};
+use ironbark::{Error, Finish, Options, Sampling, Session};
 
+/// Greedy, so replies repeat token for token (Qwen samples by default).
 fn open(options: Options) -> Option<Session> {
     let dir = std::env::var_os("IRONBARK_MODEL")?;
-    Some(
-        Session::open(
-            dir,
-            Options {
-                budget: Some(2_000_000_000),
-                ..options
-            },
-        )
-        .expect("open"),
+    let mut s = Session::open(
+        dir,
+        Options {
+            budget: Some(2_000_000_000),
+            ..options
+        },
     )
+    .expect("open");
+    s.set_sampling(Some(Sampling::GREEDY));
+    Some(s)
 }
 
 fn reply(s: &mut Session, message: &str) -> String {
@@ -46,7 +47,7 @@ fn a_dropped_reply_leaves_the_conversation_usable() {
 #[test]
 fn context_cap_is_enforced() {
     let Some(mut s) = open(Options {
-        max_context: 64,
+        max_context: Some(64),
         ..Options::default()
     }) else {
         return;
@@ -75,7 +76,7 @@ fn a_new_conversation_restores_the_system_turn() {
     let first = reply(&mut s, "Name a primary colour. One word.");
     let held = s.context();
     s.reset();
-    // Restored from the snapshot: the same reply, token for token, after the same context.
+    // Restored from the snapshot: the same reply after the same context.
     let again = reply(&mut s, "Name a primary colour. One word.");
     assert_eq!(first, again);
     assert_eq!(s.context(), held);
@@ -150,6 +151,10 @@ fn embed_fetched_on_demand_decodes_the_same() {
     let Some(model) = std::env::var_os("IRONBARK_MODEL").map(std::path::PathBuf::from) else {
         return;
     };
+    // Maple only: a Qwen pack has no embed.bin.
+    if ironbark::is_qwen(&model) {
+        return;
+    }
     let mut local = open(Options::default()).unwrap();
     let want = local.generate("The capital of Germany is", 16).unwrap();
     drop(local);
@@ -182,4 +187,66 @@ fn embed_fetched_on_demand_decodes_the_same() {
     assert!(p.present > 0 && p.present < p.total / 10, "{p:?}");
     drop(s);
     std::fs::remove_dir_all(&client).unwrap();
+}
+
+#[test]
+fn a_session_moves_between_threads() {
+    // As through the C API: an app opens the model on one thread and may call it from another
+    // each time. An array left lazy between calls is tied to its thread's GPU stream and fails
+    // on the next ("There is no Stream(gpu, 0) in current thread").
+    struct Moved(Session);
+    // SAFETY: the session is used by one thread at a time (moved, then joined).
+    unsafe impl Send for Moved {}
+    fn on_thread<T: Send + 'static>(s: Session, f: impl FnOnce(&mut Session) -> T + Send + 'static) -> (Session, T) {
+        let moved = Moved(s);
+        let back = std::thread::spawn(move || {
+            // The whole wrapper, not just its field (closures capture fields separately).
+            let moved = moved;
+            let Moved(mut s) = moved;
+            let out = f(&mut s);
+            (Moved(s), out)
+        })
+        .join()
+        .unwrap();
+        (back.0.0, back.1)
+    }
+    let Some(mut s) = open(Options::default()) else { return };
+    s.set_thinking(false);
+    // The model's own sampling: its state too must be ready for the next thread.
+    s.set_sampling(None);
+    for (question, answer) in [
+        ("What is the capital of Japan? One word.", "Tokyo"),
+        ("And of Italy? One word.", "Rome"),
+    ] {
+        let started;
+        (s, started) = on_thread(s, move |s| s.chat(question).map(drop));
+        started.unwrap();
+        let mut text = String::new();
+        loop {
+            let piece;
+            (s, piece) = on_thread(s, Session::next_piece);
+            match piece.unwrap() {
+                Some(p) => text += &p,
+                None => break,
+            }
+        }
+        assert!(text.contains(answer), "{text}");
+    }
+}
+
+#[test]
+fn without_tool_calls_the_reply_answers() {
+    let Some(mut s) = open(Options::default()) else { return };
+    s.set_thinking(false);
+    let weather = ironbark::json!({"type": "function", "function": {"name": "get_weather",
+        "description": "Current weather for a city", "parameters": {"type": "object",
+        "properties": {"city": {"type": "string"}}, "required": ["city"]}}});
+    s.set_system(None, &[weather]);
+    let called = reply(&mut s, "What is the weather in Oslo right now?");
+    assert!(called.contains("<tool_call>"), "{called}");
+    s.reset();
+    s.set_tool_calls(false);
+    let answered = reply(&mut s, "What is the weather in Oslo right now?");
+    assert!(!answered.contains("<tool_call>"), "{answered}");
+    assert_eq!(s.finish(), Some(Finish::Stop));
 }

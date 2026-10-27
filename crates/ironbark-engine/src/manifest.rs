@@ -98,6 +98,24 @@ pub fn write(dir: &Path, records: &[u64], record_bytes: usize, stride: usize) ->
     std::fs::write(&path, text).map_err(io(&path))
 }
 
+/// Add (or replace) the file `name` of `dir` in its manifest, the rest kept.
+///
+/// # Errors
+///
+/// Fails if the manifest or the file cannot be read, or the manifest written.
+pub fn add(dir: &Path, name: &str) -> Result<()> {
+    let path = dir.join(FILE);
+    let raw = std::fs::read(&path).map_err(io(&path))?;
+    let mut v: Value = serde_json::from_slice(&raw).map_err(|e| Error::Format(format!("{}: {e}", path.display())))?;
+    check_version(&v, &path)?;
+    let file = dir.join(name);
+    let data = std::fs::read(&file).map_err(io(&file))?;
+    let files = v["files"].as_object_mut().ok_or_else(|| Error::Format(format!("{}: no files", path.display())))?;
+    files.insert(name.to_owned(), json!({ "bytes": data.len(), "hash": hex(hash(&data)) }));
+    let text = serde_json::to_string_pretty(&v).map_err(|e| Error::Format(e.to_string()))?;
+    std::fs::write(&path, text).map_err(io(&path))
+}
+
 /// What [`verify`] checked and found.
 #[derive(Debug, Clone, Default)]
 pub struct Report {

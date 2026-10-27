@@ -67,6 +67,8 @@ pub struct StepTiming {
     pub total_ns: u64,
     /// Blocked on the per-layer router readbacks (GPU work before them, plus the round trip).
     pub sync_ns: u64,
+    /// Of `sync_ns`: encoding and committing the GPU work (the rest waits for it to run).
+    pub encode_ns: u64,
 }
 
 /// Streaming state: the expert store and its slab as one MLX array.
@@ -96,7 +98,7 @@ fn packed_format(dir: &Path) -> Result<String> {
 
 /// Slot table of a cache that holds every expert (the store preloaded them): the slot of expert
 /// `l · E + e`.
-fn preload(store: &Store, layers: usize, experts: usize) -> Result<Array> {
+pub(crate) fn preload(store: &Store, layers: usize, experts: usize) -> Result<Array> {
     for l in 0..layers {
         for e in 0..experts {
             store.request(l, e);
@@ -585,6 +587,12 @@ impl Model {
         Ok(())
     }
 
+    /// The KV cache arrays.
+    #[must_use]
+    pub fn kv_arrays(&self) -> Vec<&Array> {
+        self.kv.iter().flat_map(|kv| [&kv.k, &kv.v].into_iter().flatten()).collect()
+    }
+
     /// The KV cache as it is now, to return to with [`Model::restore`] (e.g. after a prompt
     /// every conversation starts with). Shares the arrays: MLX copies on the next write.
     #[must_use]
@@ -601,6 +609,14 @@ impl Model {
         let _ = self.release_held();
         self.kv.clone_from(&s.kv);
         self.pos = s.pos;
+    }
+
+    /// Clear the KV cache and drop the queued step without running it: after a failed GPU
+    /// command buffer, waiting on its arrays fails again.
+    pub fn discard(&mut self) {
+        self.held_until = None;
+        self.held.clear();
+        self.reset();
     }
 
     /// Clear the KV cache.
@@ -683,8 +699,13 @@ impl Model {
 
             // Mixture of experts: add + norm, route, experts, then the weighted sum is folded
             // into the next add + norm (the next layer's input norm, or the final norm).
-            let (ids, scores);
+            let (mut ids, mut scores);
             (h, hn, ids, scores) = self.fused.add_norm_router(&h, &r, &ly.post_norm, &ly.router)?;
+            // Dynamic top-k: a dropped choice repeats the strongest with score 0 (no read; the
+            // fused kernels still take 8).
+            if c.dynamic.on(c.top_k) {
+                (ids, scores) = c.dynamic.apply(&ids, &scores)?;
+            }
             let next = self.layers.get(i + 1).map_or(&self.norm, |l| &l.in_norm);
             if let (Some(st), None) = (&self.stream, &ly.experts)
                 && let Some(all) = &st.all
@@ -706,7 +727,12 @@ impl Model {
                     let mut preds = Vec::new();
                     for (j, nl) in self.layers.iter().enumerate().skip(i + 1).take(self.lookahead) {
                         let (_, hp) = self.fused.add_norm(&h, &self.zero, &nl.post_norm)?;
-                        preds.push((j, self.fused.router(&hp, &nl.router)?.0));
+                        let (mut p, ps) = self.fused.router(&hp, &nl.router)?;
+                        // As this step routes: dropped choices repeat the strongest (no prefetch).
+                        if c.dynamic.on(c.top_k) {
+                            p = c.dynamic.apply(&p, &ps)?.0;
+                        }
+                        preds.push((j, p));
                     }
                     let mut wanted = vec![&ids];
                     wanted.extend(preds.iter().map(|(_, p)| p));

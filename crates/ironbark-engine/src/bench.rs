@@ -12,9 +12,90 @@ use ironbark_mlx::ops::indexing::argmax_axis;
 use ironbark_mlx::transforms::async_eval;
 use ironbark_mlx::{Array, Dtype};
 
-use ironbark_experts::Layout;
+use ironbark_experts::{Layout, Store};
 
 use crate::{Error, Model, Result};
+
+/// A model [`generate`] can run: Maple ([`Model`]) or Qwen ([`crate::qwen::Model`]).
+pub trait Decode {
+    /// Clear the caches.
+    fn reset(&mut self);
+    /// Logits of the last of `ids` (`[1, 1, vocab]`).
+    ///
+    /// # Errors
+    ///
+    /// Fails if an MLX op fails.
+    fn prefill(&mut self, ids: &[u32]) -> Result<Array>;
+    /// Lazy logits of one token `[1]` (u32, may be unevaluated).
+    ///
+    /// # Errors
+    ///
+    /// Fails if an MLX op fails.
+    fn step_lazy(&mut self, ids: &Array) -> Result<Array>;
+    /// The expert store, when experts are streamed.
+    fn store(&self) -> Option<&std::sync::Arc<Store>>;
+    /// Step timing since the last [`Decode::reset_timing`].
+    fn timing(&self) -> crate::StepTiming;
+    /// Zero the step timing.
+    fn reset_timing(&mut self);
+    /// Caches written by the last step that its logits do not depend on: to schedule with the
+    /// next token, so no array stays lazy (and tied to this thread's GPU stream) between calls.
+    fn pending(&self) -> Vec<&Array> {
+        Vec::new()
+    }
+}
+
+impl Decode for Model {
+    fn reset(&mut self) {
+        Model::reset(self);
+    }
+    fn prefill(&mut self, ids: &[u32]) -> Result<Array> {
+        Model::prefill(self, ids, false)
+    }
+    fn step_lazy(&mut self, ids: &Array) -> Result<Array> {
+        Model::step_lazy(self, ids)
+    }
+    fn store(&self) -> Option<&std::sync::Arc<Store>> {
+        Model::store(self)
+    }
+    fn pending(&self) -> Vec<&Array> {
+        Model::kv_arrays(self)
+    }
+    fn timing(&self) -> crate::StepTiming {
+        self.timing
+    }
+    fn reset_timing(&mut self) {
+        self.timing = crate::StepTiming::default();
+    }
+}
+
+impl Decode for crate::qwen::Model {
+    fn reset(&mut self) {
+        crate::qwen::Model::reset(self);
+    }
+    fn prefill(&mut self, ids: &[u32]) -> Result<Array> {
+        crate::qwen::Model::prefill(self, ids, false)
+    }
+    fn step_lazy(&mut self, ids: &Array) -> Result<Array> {
+        crate::qwen::Model::step_lazy(self, ids)
+    }
+    fn store(&self) -> Option<&std::sync::Arc<Store>> {
+        crate::qwen::Model::store(self)
+    }
+    fn pending(&self) -> Vec<&Array> {
+        crate::qwen::Model::state_arrays(self)
+    }
+    /// Only the readback wait is counted; [`generate`] times the steps.
+    fn timing(&self) -> crate::StepTiming {
+        crate::StepTiming {
+            sync_ns: self.sync_ns,
+            ..crate::StepTiming::default()
+        }
+    }
+    fn reset_timing(&mut self) {
+        self.sync_ns = 0;
+    }
+}
 
 /// A greedy generation with its timings.
 #[derive(Debug, Clone)]
@@ -45,7 +126,7 @@ pub struct Generation {
 /// # Errors
 ///
 /// Fails if `ids` is empty or an MLX op fails.
-pub fn generate(m: &mut Model, ids: &[u32], n: usize) -> Result<Generation> {
+pub fn generate(m: &mut impl Decode, ids: &[u32], n: usize) -> Result<Generation> {
     if ids.is_empty() {
         return Err(Error::Format("empty prompt".into()));
     }
@@ -55,22 +136,27 @@ pub fn generate(m: &mut Model, ids: &[u32], n: usize) -> Result<Generation> {
     ironbark_mlx::memory::reset_peak_memory()?;
     let sampler = crate::device::PeakSampler::start();
     let t = Instant::now();
-    let logits = m.prefill(ids, false)?;
+    let logits = m.prefill(ids)?;
     logits.eval()?;
     let prefill_s = t.elapsed().as_secs_f64();
     let (after_prefill, prefill_peak) = (active(), ironbark_mlx::memory::peak_memory().unwrap_or(0));
 
     // Pipelined decode: queue step t+1 from the lazy argmax of step t, then read token t
     // while the GPU runs step t+1.
-    reset_stats(m);
+    m.reset_timing();
+    if let Some(s) = m.store() {
+        reset_store(s);
+    }
     let t = Instant::now();
     let pick = |l: &Array| -> Result<Array> { Ok(argmax_axis(l, -1, None)?.reshape(&[1])?.as_dtype(Dtype::Uint32)?) };
     let mut y = pick(&logits)?;
     async_eval([&y])?;
     let mut tokens = Vec::with_capacity(n);
-    let mut read = std::time::Duration::ZERO;
+    let (mut read, mut steps) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
     for _ in 0..n {
+        let ts = Instant::now();
         let ny = pick(&m.step_lazy(&y)?)?;
+        steps += ts.elapsed();
         async_eval([&ny])?;
         let t = Instant::now();
         tokens.push(y.item_exact::<u32>());
@@ -88,7 +174,11 @@ pub fn generate(m: &mut Model, ids: &[u32], n: usize) -> Result<Generation> {
         active: [before, after_prefill, active()],
         prefill_peak,
         footprint_peak,
-        timing: m.timing,
+        timing: crate::StepTiming {
+            steps: n as u64,
+            total_ns: steps.as_nanos() as u64,
+            ..m.timing()
+        },
         read_ns: read.as_nanos() as u64,
     })
 }
@@ -97,20 +187,25 @@ pub fn generate(m: &mut Model, ids: &[u32], n: usize) -> Result<Generation> {
 pub fn reset_stats(m: &mut Model) {
     m.timing = crate::StepTiming::default();
     if let Some(s) = m.store() {
-        let st = &s.stats;
-        for a in [
-            &st.hits,
-            &st.demand_loads,
-            &st.late_prefetch,
-            &st.prefetch_issued,
-            &st.prefetch_used,
-            &st.prefetch_dropped,
-            &st.bytes_read,
-            &st.wait_ns,
-            &st.slot_waits,
-        ] {
-            a.store(0, Relaxed);
-        }
+        reset_store(s);
+    }
+}
+
+/// Zero the expert store counters.
+pub fn reset_store(s: &Store) {
+    let st = &s.stats;
+    for a in [
+        &st.hits,
+        &st.demand_loads,
+        &st.late_prefetch,
+        &st.prefetch_issued,
+        &st.prefetch_used,
+        &st.prefetch_dropped,
+        &st.bytes_read,
+        &st.wait_ns,
+        &st.slot_waits,
+    ] {
+        a.store(0, Relaxed);
     }
 }
 
@@ -169,11 +264,17 @@ impl ExpertStats {
                 dropped: 0.0,
             });
         };
+        Some(Self::of_store(s, n))
+    }
+
+    /// Counters of the expert store `s` over `n` tokens.
+    #[must_use]
+    pub fn of_store(s: &Store, n: usize) -> Self {
         let st = &s.stats;
         let g = |a: &AtomicU64| a.load(Relaxed) as f64;
         let (hits, loads, late) = (g(&st.hits), g(&st.demand_loads), g(&st.late_prefetch));
         let n = n.max(1) as f64;
-        Some(Self {
+        Self {
             per_layer: s.per_layer(),
             experts: s.layout.experts,
             cache_bytes: s.slab().len() * s.slab().slot_bytes(),
@@ -190,7 +291,7 @@ impl ExpertStats {
             prefetch_used: g(&st.prefetch_used) / g(&st.prefetch_issued).max(1.0),
             late: late / n,
             dropped: g(&st.prefetch_dropped) / n,
-        })
+        }
     }
 }
 

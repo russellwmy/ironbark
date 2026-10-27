@@ -204,6 +204,11 @@ impl Stream {
         }
     }
 
+    /// Make `stream` the default stream of its device (as [`crate::Device::set_default`]).
+    pub fn set_default(stream: &Stream) {
+        unsafe { ironbark_mlx_sys::mlx_set_default_stream(stream.c_stream) };
+    }
+
     /// Get the underlying C pointer.
     pub fn as_ptr(&self) -> ironbark_mlx_sys::mlx_stream {
         self.c_stream

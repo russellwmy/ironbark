@@ -17,7 +17,7 @@ allow-print-in-tests = true
 allow-dbg-in-tests = true
 
 # Words that are not code in doc comments
-doc-valid-idents = ["MoE", "DeepGrove", "FlashHead", "RoPE", "RMSNorm", "SiLU", "SwiGLU", "KV", "LRU", "SSD", "Metal", "MLX", "NAX", "macOS", "iOS", "iPhone", "..", "safetensors"]
+doc-valid-idents = ["MoE", "DeepGrove", "FlashHead", "RoPE", "MRoPE", "DeltaNet", "RMSNorm", "SiLU", "SwiGLU", "KV", "LRU", "SSD", "Metal", "MLX", "NAX", "macOS", "iOS", "iPhone", "..", "safetensors"]
 
 disallowed-methods = [
   { path = "std::thread::sleep", reason = "use an event (Condvar, channel) instead of polling" },

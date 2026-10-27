@@ -289,6 +289,28 @@ pub(crate) fn wrap_slab(store: &std::sync::Arc<ironbark_experts::Store>) -> Resu
     unsafe { wrap(slab.as_ptr().cast(), &shape, Dtype::Uint32, store) }
 }
 
+/// The slab of `store` as one MLX array per layer, `[per_layer, stride / 4]` (u32), over the
+/// same memory (no copy): layer `l` owns slots `l · per_layer ..`, and a kernel indexes them
+/// from 0. Metal pays a fixed ~30 µs per kernel call that reads a buffer above ~200 MB (Apple
+/// M1 Max, MLX 0.32), so kernels get a layer's slots, not the whole slab.
+///
+/// Kernels may only read slots pinned by an [`ironbark_experts::ExpertRef`].
+pub(crate) fn wrap_slab_layers(store: &std::sync::Arc<ironbark_experts::Store>, layers: usize) -> Result<Vec<Array>> {
+    let slab = store.slab();
+    let stride = slab.slot_bytes();
+    let per = store.per_layer();
+    let shape = [per as i32, (stride / 4) as i32];
+    (0..layers)
+        .map(|l| {
+            // SAFETY: layer `l`'s slots start inside the slab allocation.
+            let ptr = unsafe { slab.as_ptr().add(l * per * stride) };
+            // SAFETY: they are whole pages inside the slab (page-aligned slots), valid while the
+            // store lives.
+            unsafe { wrap(ptr.cast(), &shape, Dtype::Uint32, store) }
+        })
+        .collect()
+}
+
 /// A read-only memory map of a whole file, unmapped on drop.
 pub(crate) struct Mapped {
     ptr: *mut libc::c_void,

@@ -1,6 +1,8 @@
-//! Tool use in Maple's chat format (`chat_template.jinja`): tools are listed as JSON in the
-//! system turn, the model answers with `<tool_call>` blocks, and the app sends the results back
-//! as `<tool_response>` blocks in a user turn.
+//! Tool use in the models' chat formats (`chat_template.jinja`): tools are listed as JSON in
+//! the system turn, the model answers with `<tool_call>` blocks, and the app sends the results
+//! back as `<tool_response>` blocks in a user turn. Maple's calls are JSON; Qwen3.5 / 3.6 write
+//! them as XML (`<function=name><parameter=arg>value</parameter></function>`). [`parse`] reads
+//! both.
 //!
 //! ```text
 //!   system  : # Tools … <tools>{"type":"function","function":{…}}</tools> …
@@ -32,7 +34,8 @@ pub struct Parsed {
     pub text: String,
     /// Tool calls, in order.
     pub calls: Vec<ToolCall>,
-    /// `<tool_call>` blocks that are not `{"name": …, "arguments": …}` JSON.
+    /// `<tool_call>` blocks that are neither `{"name": …, "arguments": …}` JSON nor a
+    /// `<function=…>` block.
     pub malformed: Vec<String>,
 }
 
@@ -55,6 +58,14 @@ pub fn parse(reply: &str) -> Parsed {
     while let Some((before, after)) = rest.split_once("<tool_call>") {
         text.push_str(before);
         let (body, after) = after.split_once("</tool_call>").unwrap_or((after, ""));
+        if body.trim_start().starts_with("<function=") {
+            match xml_call(body.trim()) {
+                Some(c) => p.calls.push(c),
+                None => p.malformed.push(body.trim().to_owned()),
+            }
+            rest = after;
+            continue;
+        }
         match serde_json::from_str::<Value>(body.trim()) {
             Ok(Value::Object(mut o)) if o.get("name").is_some_and(Value::is_string) => p.calls.push(ToolCall {
                 name: o.remove("name").and_then(|n| n.as_str().map(str::to_owned)).unwrap_or_default(),
@@ -71,8 +82,47 @@ pub fn parse(reply: &str) -> Parsed {
     }
 }
 
-/// The system turn: `system` and, with `tools`, their JSON schemas and the call format.
-pub(crate) fn system_turn(system: Option<&str>, tools: &[Value]) -> String {
+/// A Qwen3.5 / 3.6 call: `<function=name>` then `<parameter=arg>\nvalue\n</parameter>` blocks.
+/// A value is JSON when it parses as anything but a string (the template writes non-strings
+/// as JSON), else the text itself.
+fn xml_call(body: &str) -> Option<ToolCall> {
+    // The name ends at `>` or, when a model drops the `>`, at the line end.
+    let after = body.strip_prefix("<function=")?;
+    let (name, rest) = after.split_at(after.find(['>', '\n'])?);
+    let mut rest = rest.strip_prefix('>').unwrap_or(rest);
+    let mut args = serde_json::Map::new();
+    while let Some((_, after)) = rest.split_once("<parameter=") {
+        let (key, after) = after.split_once('>')?;
+        let (raw, after) = after.split_once("</parameter>")?;
+        let raw = raw.strip_prefix('\n').unwrap_or(raw);
+        let raw = raw.strip_suffix('\n').unwrap_or(raw);
+        let value = match serde_json::from_str::<Value>(raw) {
+            Ok(v) if !v.is_string() => v,
+            _ => Value::String(raw.to_owned()),
+        };
+        args.insert(key.trim().to_owned(), value);
+        rest = after;
+    }
+    Some(ToolCall {
+        name: name.trim().to_owned(),
+        arguments: Value::Object(args),
+    })
+}
+
+/// The chat format of a model: Maple and Qwen3.5 / 3.6 use `ChatML` turns
+/// (`<|im_start|>role … <|im_end|>`) and differ in the tool instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Format {
+    Maple,
+    Qwen,
+}
+
+/// The system turn: `system` and, with `tools`, their JSON schemas and the call format of
+/// the model's chat `format`.
+pub(crate) fn system_turn(system: Option<&str>, tools: &[Value], format: Format) -> String {
+    if format == Format::Qwen && !tools.is_empty() {
+        return qwen_system_turn(system, tools);
+    }
     if tools.is_empty() {
         return system.map_or_else(String::new, |s| format!("<|im_start|>system\n{s}<|im_end|>\n"));
     }
@@ -96,6 +146,35 @@ pub(crate) fn system_turn(system: Option<&str>, tools: &[Value]) -> String {
     );
     t
 }
+
+/// Qwen3.5 / 3.6's system turn with tools, as its `chat_template.jinja` writes it.
+fn qwen_system_turn(system: Option<&str>, tools: &[Value]) -> String {
+    let mut t = String::from("<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>");
+    for tool in tools {
+        t.push('\n');
+        py_json(tool, &mut t);
+    }
+    t.push_str("\n</tools>");
+    t.push_str(QWEN_TOOLS);
+    if let Some(s) = system.map(str::trim).filter(|s| !s.is_empty()) {
+        t.push_str("\n\n");
+        t.push_str(s);
+    }
+    t.push_str("<|im_end|>\n");
+    t
+}
+
+/// The call instructions after Qwen3.5 / 3.6's tool list.
+const QWEN_TOOLS: &str = "\n\nIf you choose to call a function ONLY reply in the following format with NO \
+                          suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\n\
+                          value_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second \
+                          parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n\
+                          <IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner \
+                          <function=...></function> block must be nested within <tool_call></tool_call> XML \
+                          tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for \
+                          your function call in natural language BEFORE the function call, but NOT after\n- If \
+                          there is no function call available, answer the question like normal with your current \
+                          knowledge and do not tell the user about function calls\n</IMPORTANT>";
 
 /// `v` as the template's `tojson` writes it (Python's `json.dumps`: `", "` and `": "`).
 fn py_json(v: &Value, out: &mut String) {
@@ -194,10 +273,80 @@ mod tests {
     }
 
     #[test]
+    fn parses_qwen_xml_calls() {
+        let p = parse(
+            "\nNeed the weather.\n</think>\n\n<tool_call>\n<function=weather>\n<parameter=city>\nHong Kong\n\
+             </parameter>\n<parameter=days>\n3\n</parameter>\n<parameter=opts>\n{\"unit\": \"c\"}\n</parameter>\n\
+             </function>\n</tool_call>\n<tool_call>\n<function=now>\n</function>\n</tool_call>",
+        );
+        assert_eq!(p.thinking, "Need the weather.");
+        assert_eq!(p.text, "");
+        assert!(p.malformed.is_empty(), "{:?}", p.malformed);
+        assert_eq!(
+            p.calls,
+            vec![
+                ToolCall {
+                    name: "weather".into(),
+                    arguments: json!({"city": "Hong Kong", "days": 3, "opts": {"unit": "c"}})
+                },
+                ToolCall {
+                    name: "now".into(),
+                    arguments: json!({})
+                }
+            ]
+        );
+        // A dropped `>` after the name: the name ends at the line end.
+        let p = parse(
+            "<tool_call>\n<function=get_weather\n<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call>",
+        );
+        assert_eq!(
+            p.calls,
+            vec![ToolCall {
+                name: "get_weather".into(),
+                arguments: json!({"city": "Oslo"})
+            }]
+        );
+    }
+
+    /// Byte-exact against the Jinja template as the oracle rendered it (`QWEN_FIXTURE`, written
+    /// with the model's tokenizer): system turn with a tool, user turn, generation prompt.
+    #[test]
+    fn qwen_turns_match_the_rendered_template() {
+        let Ok(path) = std::env::var("QWEN_FIXTURE") else {
+            eprintln!("skipped: set QWEN_FIXTURE");
+            return;
+        };
+        let fx: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let t = &fx["template"];
+        let system = t["system"].as_str().unwrap();
+        let head = system_turn(Some(system), std::slice::from_ref(&t["tool"]), Format::Qwen)
+            + &Message::User(t["user"].as_str().unwrap()).turn()
+            + "<|im_start|>assistant\n";
+        assert_eq!(format!("{head}<think>\n\n</think>\n\n"), t["no_think"].as_str().unwrap());
+        assert_eq!(format!("{head}<think>\n"), t["think"].as_str().unwrap());
+    }
+
+    #[test]
+    fn qwen_system_turn_matches_the_template() {
+        let tool = json!({"type": "function", "function": {"name": "now", "parameters": {}}});
+        let t = system_turn(Some("Be brief."), std::slice::from_ref(&tool), Format::Qwen);
+        assert!(t.starts_with(
+            "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \
+             \"function\", \"function\": {\"name\": \"now\", \"parameters\": {}}}\n</tools>\n\nIf you choose"
+        ));
+        assert!(
+            t.ends_with("do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n"),
+            "{t}"
+        );
+        assert!(t.contains("multiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- "));
+        assert_eq!(system_turn(Some("Be brief."), &[], Format::Qwen), "<|im_start|>system\nBe brief.<|im_end|>\n");
+    }
+
+    #[test]
     fn turns_match_the_chat_template() {
-        assert_eq!(system_turn(None, &[]), "");
-        assert_eq!(system_turn(Some("Be brief."), &[]), "<|im_start|>system\nBe brief.<|im_end|>\n");
-        let t = system_turn(Some("Be brief."), &[json!({"type": "function", "f": [1, "x"]})]);
+        assert_eq!(system_turn(None, &[], Format::Maple), "");
+        assert_eq!(system_turn(Some("Be brief."), &[], Format::Maple), "<|im_start|>system\nBe brief.<|im_end|>\n");
+        let t = system_turn(Some("Be brief."), &[json!({"type": "function", "f": [1, "x"]})], Format::Maple);
         assert!(t.starts_with("<|im_start|>system\nBe brief.\n\n# Tools\n"));
         assert!(t.contains("<tools>\n{\"type\": \"function\", \"f\": [1, \"x\"]}\n</tools>"), "{t}");
         assert_eq!(

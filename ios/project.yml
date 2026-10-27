@@ -23,6 +23,7 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIApplicationSupportsIndirectInputEvents: true
+        NSCameraUsageDescription: Take a photo to ask the model about it (the photo stays on this iPhone).
         # Replies continue off screen as continued-processing tasks (iOS 26, background GPU).
         BGTaskSchedulerPermittedIdentifiers: [dev.ironbark.bench.reply.*]
         UIBackgroundModes: [processing]

@@ -1,6 +1,6 @@
 //! Reverse-mode gradients: [`value_and_grad`] of a function of arrays, and [`stop_gradient`].
 //!
-//! ironbark never trains; this is for tools that fine-tune models for it (ironwood).
+//! ironbark never trains; this is for tools that fine-tune models for it.
 
 use crate::{
     Array, Stream,

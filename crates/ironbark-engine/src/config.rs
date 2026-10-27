@@ -43,6 +43,8 @@ pub struct Config {
     pub head_group: usize,
     /// FlashHead metadata, if the checkpoint has one.
     pub flash_head: Option<FlashMeta>,
+    /// Dynamic top-k for decode steps (off by default).
+    pub dynamic: crate::dynamic::Dynamic,
 }
 
 /// FlashHead settings (`config.json` `flash_head`).
@@ -101,6 +103,7 @@ impl Config {
             group: q["group_size"].as_u64().unwrap_or(128) as usize,
             head_bits: q["lm_head"]["bits"].as_u64().unwrap_or(4) as usize,
             head_group: q["lm_head"]["group_size"].as_u64().unwrap_or(64) as usize,
+            dynamic: crate::dynamic::Dynamic::default(),
             // Older metadata has unscaled centroids (maple.py refuses it too).
             flash_head: c["flash_head"]["scaled_centroids"].as_bool().unwrap_or(false).then(|| FlashMeta {
                 probes: c["flash_head"]["n_probes"].as_u64().unwrap_or(512) as usize,

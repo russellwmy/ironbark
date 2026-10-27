@@ -51,7 +51,7 @@ const QD_2BIT: &str = "#define QD(w,row,g,a) maple_qdot((w)+(row)*(K/4)+(g)*4,xt
 
 /// Digits of every byte, 2 bits each (digit `n` at bits `2n`): `((u8)(b · 3^n) · 3) >> 8`, the
 /// decoding `pack` is tested against, precomputed for all 256 bytes (`maple_trit_lut`).
-fn trit_lut() -> String {
+pub(crate) fn trit_lut() -> String {
     let entries: Vec<String> = (0..=255u8)
         .map(|b| {
             let v = (0..5u32).fold(0u16, |v, n| {

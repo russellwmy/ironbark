@@ -1,4 +1,4 @@
-//! C API for running Maple from an iOS or macOS app (`include/ironbark.h`).
+//! C API for running Maple or Qwen3.5 / 3.6 from an iOS or macOS app (`include/ironbark.h`).
 //!
 //! A session is a model streamed from a packed dir (`ironbark pack`). Calls that report something
 //! return a JSON string the caller frees with [`ironbark_free_string`]; on failure the JSON is
@@ -77,7 +77,7 @@ fn experts_json(x: &ExpertStats) -> Value {
 fn generate(s: &mut ironbark::Session, prompt: &str, n: usize) -> Result<Value> {
     let g = s.generate(prompt, n).map_err(|e| e.to_string())?;
     let text = s.decode(&g.tokens).map_err(|e| e.to_string())?;
-    let experts = ExpertStats::of(s.model(), g.tokens.len()).map(|x| experts_json(&x));
+    let experts = s.expert_stats(g.tokens.len()).map(|x| experts_json(&x));
     Ok(json!({
         "prompt_tokens": g.prompt,
         "prefill_s": g.prefill_s,
@@ -92,6 +92,7 @@ fn generate(s: &mut ironbark::Session, prompt: &str, n: usize) -> Result<Value> 
         "timing_ms_per_tok": {
             "step": g.timing.total_ns as f64 / 1e6 / n.max(1) as f64,
             "sync": g.timing.sync_ns as f64 / 1e6 / n.max(1) as f64,
+            "encode": g.timing.encode_ns as f64 / 1e6 / n.max(1) as f64,
             "read": g.read_ns as f64 / 1e6 / n.max(1) as f64,
         },
         "plan": plan_json(s),
@@ -630,6 +631,46 @@ pub unsafe extern "C" fn ironbark_set_lookahead(s: *mut Session, layers: u32) {
     }
 }
 
+/// Run GPU work on a fresh default stream, after a GPU error (e.g. "Insufficient Permission (to
+/// submit GPU work from background)"): the failed stream fails every later operation. Sessions
+/// do this themselves (and read their conversation again); for other MLX work.
+#[unsafe(no_mangle)]
+pub extern "C" fn ironbark_reset_gpu() {
+    ironbark::reset_gpu();
+}
+
+/// Whether replies may call tools (default true). Off, the model cannot start a `<tool_call>`
+/// and answers with what it has.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_set_tool_calls(s: *mut Session, on: bool) {
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    if let Some(s) = unsafe { s.as_mut() } {
+        s.0.set_tool_calls(on);
+    }
+}
+
+/// Dynamic top-k: decode drops each token's expert choices whose share of its routing weight is
+/// under `drop_below` (0: off, the default), keeping at least `min_k`. Fewer expert reads per
+/// token. Every model (Qwen, Maple); returns true.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_set_dynamic_k(s: *mut Session, drop_below: f32, min_k: u32) -> bool {
+    let d = ironbark::Dynamic {
+        drop_below,
+        min_k: min_k as usize,
+        ..ironbark::Dynamic::default()
+    };
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    unsafe { s.as_mut() }.is_some_and(|s| s.0.set_dynamic_k(d))
+}
+
 /// Decode with FlashHead (approximate LM head) or the exact head (default). Returns
 /// `{"available": bool}` (false: the model has no FlashHead).
 ///
@@ -685,6 +726,43 @@ pub unsafe extern "C" fn ironbark_send(s: *mut Session, messages: *const c_char,
         // The reply streams through ironbark_next.
         s.send(&list).map_err(|e| e.to_string())?;
         Ok(stats(s))
+    })
+}
+
+/// Qwen: encode an image for the next user message of [`ironbark_send`] (shown before its
+/// text). `rgb` is `height` rows of `width` RGB pixels (3 bytes each, top to bottom), resized
+/// to at most `max_pixels` (0: 512 × 512). Returns JSON `tokens`, `width`, `height` (resized)
+/// and `encode_s`.
+///
+/// # Safety
+///
+/// `s` comes from [`ironbark_open`] and is not used concurrently; `rgb` points to
+/// `width · height · 3` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_set_image(
+    s: *mut Session,
+    rgb: *const u8,
+    width: u32,
+    height: u32,
+    max_pixels: u32,
+) -> *mut c_char {
+    // SAFETY: the caller guarantees `s` is a live session used by this thread only.
+    let s = unsafe { s.as_mut() };
+    report(|| {
+        let s = &mut s.ok_or("null session")?.0;
+        if rgb.is_null() {
+            return Err("null image".into());
+        }
+        let (w, h) = (width as usize, height as usize);
+        // SAFETY: the caller guarantees `rgb` holds `width · height · 3` bytes.
+        let bytes = unsafe { std::slice::from_raw_parts(rgb, w * h * 3) };
+        let max = if max_pixels == 0 {
+            ironbark::IMAGE_PIXELS
+        } else {
+            max_pixels as usize
+        };
+        let i = s.set_image(bytes, w, h, max).map_err(|e| e.to_string())?;
+        Ok(json!({ "tokens": i.tokens, "width": i.width, "height": i.height, "encode_s": i.encode_s }))
     })
 }
 

@@ -63,6 +63,7 @@ ironbark-mlx-sys = { version = "0.1.1", path = "crates/ironbark-mlx-sys" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 half = "2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"

@@ -20,18 +20,24 @@
 pub mod bench;
 mod config;
 pub mod device;
+pub mod dynamic;
 mod embed;
 mod error;
+mod experts;
 mod flash;
 mod fused;
 mod kernel;
+mod kv;
 pub mod manifest;
 mod model;
 mod pack;
 pub mod plan;
 mod prefill;
 pub mod profile;
+mod quant;
+pub mod qwen;
 mod row;
+mod tern;
 
 pub use config::{Config, FlashMeta};
 pub use error::{Error, Result};

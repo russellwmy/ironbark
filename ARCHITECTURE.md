@@ -47,7 +47,7 @@ ironbark/
 │   ├── ironbark-experts/   expert store: slab, loaders, LRU, pinning
 │   ├── ironbark-fetch/     fills experts.bin / embed.bin from a remote copy
 │   ├── ironbark-ffi/       C API (include/ironbark.h)
-│   ├── ironbark-cli/       `ironbark` binary: download, pack, verify, gen, ppl, profile
+│   ├── ironbark-cli/       `ironbark` binary: download, pack, verify, gen, profile
 │   ├── ironbark-mlx/       safe Rust API over MLX
 │   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                    IronbarkBench app (SwiftUI, xcodegen)
@@ -70,7 +70,7 @@ ironbark/
 | `ironbark-experts` | Expert memory and loading, no GPU code | `Store`, `Slab`, `Layout`, `Records` |
 | `ironbark-fetch` | A sparse `experts.bin` that fills from a server | `Sparse`, `Fetch` |
 | `ironbark-ffi` | C functions returning JSON, for Swift | `ironbark_open`, `ironbark_send`, … |
-| `ironbark-cli` | Developer tools | `ironbark download / pack / verify / gen / ppl / profile` |
+| `ironbark-cli` | Developer tools | `ironbark download / pack / verify / gen / profile` |
 | `ironbark-mlx` | Safe Rust API over MLX for inference | `Array`, `ops`, `transforms`, `fast` |
 | `ironbark-mlx-sys` | mlx-c bindings; builds MLX for macOS and iOS (CMake fetches MLX v0.32.4) | bindgen output; `src/docs_bindings.rs` for docs.rs |
 

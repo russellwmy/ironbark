@@ -209,53 +209,6 @@ pub(crate) fn run(dir: &Path, ex: &Experts, prompt: &str, n_gen: usize, top: usi
     Ok(())
 }
 
-/// Negative log-likelihood of `next` under logits `v`.
-fn nll(v: &[f32], next: u32) -> f64 {
-    let mx = v.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let lse = f64::from(mx) + v.iter().map(|x| f64::from(x - mx).exp()).sum::<f64>().ln();
-    lse - f64::from(v[next as usize])
-}
-
-/// Perplexity over the first `n` tokens of `text` (token by token, or one batched forward with
-/// `batch`; the first half is context, the second half is scored), for comparing with a
-/// reference implementation.
-pub(crate) fn ppl(dir: &Path, ex: &Experts, text: &Path, n: usize, batch: bool) -> Result<()> {
-    let mut m = load(dir, ex)?;
-    let tok = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json")).map_err(|e| anyhow!("{e}"))?;
-    let raw = std::fs::read_to_string(text)?;
-    let ids = tok.encode(raw, false).map_err(|e| anyhow!("{e}"))?.get_ids().to_vec();
-    anyhow::ensure!(ids.len() > n, "text has only {} tokens", ids.len());
-    if batch {
-        // One batched forward over the first n - 1 tokens; logits of every position.
-        let logits = m.prefill(&ids[..n - 1], true)?.as_dtype(ironbark_mlx::Dtype::Float32)?;
-        let vocab = m.cfg.vocab;
-        let all = logits.as_slice::<f32>();
-        let (mut total, mut count) = (0f64, 0usize);
-        for t in n / 2..n - 1 {
-            total += nll(&all[t * vocab..(t + 1) * vocab], ids[t + 1]);
-            count += 1;
-        }
-        println!("ppl {:.4} over {count} tokens (batched)", (total / count as f64).exp());
-        return Ok(());
-    }
-    let (mut total, mut count) = (0f64, 0usize);
-    for t in 0..n - 1 {
-        if t == n / 2 {
-            // The first half is context (and warms the cache); report the scored half.
-            reset_stats(&mut m);
-        }
-        let l = m.step(ids[t])?;
-        if t >= n / 2 {
-            let v = l.as_dtype(ironbark_mlx::Dtype::Float32)?;
-            total += nll(v.as_slice::<f32>(), ids[t + 1]);
-            count += 1;
-        }
-    }
-    println!("ppl {:.4} over {count} tokens", (total / count as f64).exp());
-    report_stats(&m, n - 1 - n / 2);
-    Ok(())
-}
-
 pub(crate) fn profile(dir: &Path, ex: &Experts) -> Result<()> {
     let m = load(dir, ex)?;
     let p = m.profile(200)?;

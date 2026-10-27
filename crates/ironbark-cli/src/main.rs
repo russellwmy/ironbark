@@ -13,6 +13,8 @@ use clap::{Parser, Subcommand};
 
 mod download;
 mod maple;
+mod qwen;
+mod util;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -21,7 +23,16 @@ struct Cli {
     cmd: Cmd,
 }
 
-/// Expert placement flags shared by `gen`, `profile` and `ppl`.
+/// `pack --vision-only`: add the vision encoder of `model` to the pack `out`.
+fn pack_vision(model: &std::path::Path, out: &std::path::Path) -> Result<()> {
+    anyhow::ensure!(ironbark_engine::qwen::is_qwen(model), "--vision-only: Qwen3.5 / 3.6 only");
+    let bytes = ironbark_engine::qwen::pack_vision(model, out)?
+        .ok_or_else(|| anyhow::anyhow!("{}: no vision weights", model.display()))?;
+    println!("vision encoder {:.0} MB -> {}", bytes as f64 / 1e6, out.display());
+    Ok(())
+}
+
+/// Expert placement flags shared by `gen` and `profile`.
 #[derive(Debug, clap::Args)]
 struct ExpertArgs {
     /// Stream experts from this packed dir (`ironbark pack`) instead of keeping all 256 per layer
@@ -92,19 +103,26 @@ enum Cmd {
     /// Write a streaming model dir: experts to <out>/experts.bin, the other weights, config and
     /// tokenizer next to it
     Pack {
-        /// MLX checkpoint dir
+        /// MLX checkpoint dir, or a bundle (a 4-bit checkpoint without its experts, plus
+        /// experts.safetensors: packs that)
         #[arg(long)]
         model: PathBuf,
-        /// Output dir (put it on the internal SSD)
+        /// Output dir (put it on the internal SSD; default for a bundle: <model>/pack)
         #[arg(long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
         /// Store expert rows as 2-bit codes instead of trits (23% larger)
         #[arg(long)]
         two_bit: bool,
+        /// Qwen: ternary experts from this file (codes and group scales) as trit records (default for a bundle: its experts.safetensors)
+        #[arg(long)]
+        ternary: Option<PathBuf>,
+        /// Qwen: only add the vision encoder (6-bit) to the existing pack <out>
+        #[arg(long, conflicts_with_all = ["ternary", "two_bit"])]
+        vision_only: bool,
     },
     /// Greedy decode from a prompt, with prefill / decode speed and GPU memory
     Gen {
-        /// MLX checkpoint dir (deepgrove/maple-preview-2bit-mlx)
+        /// MLX checkpoint dir (deepgrove/maple-preview-2bit-mlx), pack, or packed bundle
         #[arg(long)]
         model: PathBuf,
         /// Prompt text
@@ -116,6 +134,15 @@ enum Cmd {
         /// Print the top 5 logits of the first N decode steps (to compare with a reference)
         #[arg(long, default_value_t = 0)]
         top: usize,
+        /// Qwen: wrap the prompt as one chat turn (thinking off) and stop at the end of the turn
+        #[arg(long)]
+        chat: bool,
+        /// Qwen: an image (PNG or JPEG) before the prompt, in a chat turn
+        #[arg(long)]
+        image: Option<PathBuf>,
+        /// Qwen: most pixels the image is resized to (sides multiples of 32)
+        #[arg(long, default_value_t = 1 << 20)]
+        max_pixels: usize,
         #[command(flatten)]
         experts: ExpertArgs,
     },
@@ -126,26 +153,9 @@ enum Cmd {
     },
     /// GPU time of each part of a decode step (no syncs, no expert loads)
     Profile {
-        /// MLX checkpoint dir
+        /// MLX checkpoint dir, pack, or packed bundle
         #[arg(long)]
         model: PathBuf,
-        #[command(flatten)]
-        experts: ExpertArgs,
-    },
-    /// Perplexity of a text file: the first half of --tokens is context, the second half is scored
-    Ppl {
-        /// MLX checkpoint dir
-        #[arg(long)]
-        model: PathBuf,
-        /// Text file
-        #[arg(long)]
-        text: PathBuf,
-        /// Tokens to read from the text
-        #[arg(long, default_value_t = 512)]
-        tokens: usize,
-        /// Score with one batched forward (prefill kernels) instead of token by token
-        #[arg(long)]
-        batch: bool,
         #[command(flatten)]
         experts: ExpertArgs,
     },
@@ -162,11 +172,37 @@ fn main() -> Result<()> {
             let name = name.unwrap_or_else(|| repo.rsplit('/').next().unwrap_or(&repo).to_owned());
             let out = download::models_dir(dir)?.join(name);
             download::download(&repo, &revision, &out)?;
-            println!("done: {}\nnext: ironbark pack --model {0} --out <packed dir>", out.display());
+            let next = if ironbark_engine::qwen::bundle_experts(&out).is_some() {
+                ""
+            } else {
+                " --out <packed dir>"
+            };
+            println!("done: {}\nnext: ironbark pack --model {0}{next}", out.display());
             Ok(())
         }
-        Cmd::Pack { model, out, two_bit } => {
-            let p = ironbark_engine::pack(&model, &out, !two_bit)?;
+        Cmd::Pack {
+            model,
+            out,
+            two_bit,
+            ternary,
+            vision_only,
+        } => {
+            let bundle = ironbark_engine::qwen::bundle_experts(&model);
+            let out = match (out, &bundle) {
+                (Some(o), _) => o,
+                (None, Some(_)) => model.join(ironbark_engine::qwen::BUNDLE_PACK),
+                (None, None) => anyhow::bail!("--out: required ({} is not a bundle)", model.display()),
+            };
+            if vision_only {
+                return pack_vision(&model, &out);
+            }
+            let ternary = ternary.or(bundle);
+            let p = if let Some(t) = &ternary {
+                anyhow::ensure!(ironbark_engine::qwen::is_qwen(&model), "--ternary: Qwen3.5 / 3.6 only");
+                ironbark_engine::qwen::pack_ternary(&model, &out, t)?
+            } else {
+                ironbark_engine::pack(&model, &out, !two_bit)?
+            };
             println!(
                 "packed {} experts x {:.2} MB (stride {} B) -> {}",
                 p.records,
@@ -188,8 +224,24 @@ fn main() -> Result<()> {
             prompt,
             n_gen,
             top,
-            experts,
-        } => maple::run(&model, &experts.into_experts(), &prompt, n_gen, top),
+            chat,
+            image,
+            max_pixels,
+            mut experts,
+        } => {
+            let model = ironbark_engine::qwen::packed(&model)?;
+            experts.experts = experts.experts.as_deref().map(ironbark_engine::qwen::packed).transpose()?;
+            if image.is_some() && !ironbark_engine::qwen::is_qwen(&model) {
+                anyhow::bail!("--image: Qwen3.5 / 3.6 only");
+            }
+            if let Some(img) = image {
+                qwen::run_image(&model, &experts.into_experts(), &img, max_pixels, &prompt, n_gen)
+            } else if ironbark_engine::qwen::is_qwen(&model) {
+                qwen::run(&model, &experts.into_experts(), &prompt, n_gen, top, chat)
+            } else {
+                maple::run(&model, &experts.into_experts(), &prompt, n_gen, top)
+            }
+        }
         Cmd::Verify { dir } => {
             let r = ironbark_engine::manifest::verify(&dir, 8)?;
             for p in &r.problems {
@@ -205,13 +257,9 @@ fn main() -> Result<()> {
             anyhow::ensure!(r.problems.is_empty(), "{} problems", r.problems.len());
             Ok(())
         }
-        Cmd::Profile { model, experts } => maple::profile(&model, &experts.into_experts()),
-        Cmd::Ppl {
-            model,
-            text,
-            tokens,
-            batch,
-            experts,
-        } => maple::ppl(&model, &experts.into_experts(), &text, tokens, batch),
+        Cmd::Profile { model, mut experts } => {
+            experts.experts = experts.experts.as_deref().map(ironbark_engine::qwen::packed).transpose()?;
+            maple::profile(&ironbark_engine::qwen::packed(&model)?, &experts.into_experts())
+        }
     }
 }

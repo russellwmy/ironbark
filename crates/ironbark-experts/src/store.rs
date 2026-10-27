@@ -200,6 +200,23 @@ impl Pin {
             slot: r.slot,
         }
     }
+
+    /// The pinned slot.
+    #[must_use]
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+}
+
+impl Clone for Pin {
+    /// Another, independent pin of the same slot.
+    fn clone(&self) -> Self {
+        self.store.pins[self.slot].fetch_add(1, SeqCst);
+        Self {
+            store: Arc::clone(&self.store),
+            slot: self.slot,
+        }
+    }
 }
 
 impl Drop for Pin {
@@ -528,6 +545,34 @@ impl Store {
                 State::Free => unreachable!("index points at a free slot"),
             }
         }
+    }
+
+    /// Expert `e` of layer `l`, pinned, if it is loaded; never waits and never starts a load
+    /// (a hit when it is there, like [`Store::wait`]).
+    pub fn try_ready(&self, l: usize, e: usize) -> Option<ExpertRef<'_>> {
+        let mut g = lock(&self.inner);
+        let slot = g.index[l * self.layout.experts + e]?;
+        let State::Ready { fresh } = g.meta[slot].state else {
+            return None;
+        };
+        g.tick += 1;
+        let tick = g.tick;
+        let m = &mut g.meta[slot];
+        m.last = tick;
+        m.state = State::Ready { fresh: Fresh::No };
+        self.pins[slot].fetch_add(1, SeqCst);
+        if fresh == Fresh::Prefetch {
+            self.stats.prefetch_used.fetch_add(1, Relaxed);
+        }
+        drop(g);
+        // SAFETY: the slot is `Ready` and now pinned, so no loader writes it until the
+        // returned `ExpertRef` is dropped.
+        let data = unsafe { self.slab.slot(slot, self.layout.record_bytes as usize) };
+        Some(ExpertRef {
+            store: self,
+            slot,
+            data,
+        })
     }
 
     /// The slot memory, e.g. to wrap as one GPU buffer: slot `l * per_layer() + i` belongs to

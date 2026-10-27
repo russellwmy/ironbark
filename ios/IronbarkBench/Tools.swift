@@ -1,17 +1,36 @@
-// Tools the chat offers Maple, run in the app: a calculator (on device), the weather
-// (Open-Meteo) and Wikipedia search. Neither service needs a key. Each result is a JSON string
-// for a <tool_response>.
+// Tools the chat offers the model, run in the app: a calculator and a day counter (on device),
+// the weather (Open-Meteo) and Wikipedia search. Neither service needs a key. Each result is a
+// JSON string for a tool response, kept short: every token of it is read before the reply.
 
 import Foundation
 
 enum Tools {
     /// Function schemas for the system turn.
     static let schemas: [[String: Any]] = [
-        tool("calculator", "Evaluate an arithmetic expression exactly: + - * / ^ % and parentheses.",
-             "expression", "e.g. 2 * (3 + 4)"),
-        tool("get_weather", "Current weather and a 3-day forecast for a city.", "city", "City name, e.g. Paris"),
+        // No example values: the model copies them into calls (a calculator call of the example
+        // expression, a search for the example topic).
+        tool("calculator", "Exact arithmetic on plain numbers: + - * / ^ % and parentheses. "
+             + "Not for dates or times (use days_between).", "expression", "The arithmetic expression"),
+        // Models cannot count days between dates; given the dates, the app counts them exactly.
+        [
+            "type": "function",
+            "function": [
+                "name": "days_between",
+                "description": "Days from one date to another, and their weekdays. For how many days until or since a date.",
+                "parameters": [
+                    "type": "object",
+                    "properties": [
+                        "from": ["type": "string", "description": "Start date, YYYY-MM-DD (today's for 'until')"],
+                        "to": ["type": "string", "description": "End date, YYYY-MM-DD"],
+                    ],
+                    "required": ["from", "to"],
+                ],
+            ],
+        ],
+        tool("get_weather", "Current weather and a 3-day forecast for a city.", "city", "City name"),
         tool("wikipedia_search", "Search Wikipedia. Returns the intro of the top articles: facts about people, "
-             + "places, events, science and history.", "query", "What to look up"),
+             + "places, events, science and history. Search one name or topic, not a list of keywords.",
+             "query", "One name or topic"),
     ]
 
     static var schemasJSON: String {
@@ -39,6 +58,7 @@ enum Tools {
         let arg = { (k: String) in (args[k] as? String) ?? (args.values.first as? String) ?? "" }
         switch name {
         case "calculator": return calculator(arg("expression"))
+        case "days_between": return daysBetween((args["from"] as? String) ?? "", (args["to"] as? String) ?? "")
         case "get_weather": return weather(arg("city"))
         case "wikipedia_search": return wikipedia(arg("query"))
         default: return json(["error": "no tool named \(name)"])
@@ -48,6 +68,28 @@ enum Tools {
     static func json(_ v: Any) -> String {
         let data = (try? JSONSerialization.data(withJSONObject: v, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
         return String(decoding: data, as: UTF8.self)
+    }
+
+    // MARK: - Days between dates
+
+    static func daysBetween(_ from: String, _ to: String) -> String {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        // "today" works too: the model sometimes passes it instead of the date.
+        let parse = { (s: String) -> Date? in
+            s.lowercased() == "today" ? f.date(from: f.string(from: Date())) : f.date(from: s.trimmingCharacters(in: .whitespaces))
+        }
+        guard let a = parse(from), let b = parse(to) else {
+            return json(["error": "dates must be YYYY-MM-DD, got \(from) and \(to)"])
+        }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC") ?? .current
+        let days = cal.dateComponents([.day], from: a, to: b).day ?? 0
+        f.dateFormat = "EEEE"
+        return json(["days": days, "from_weekday": f.string(from: a), "to_weekday": f.string(from: b)])
     }
 
     // MARK: - Calculator
@@ -210,19 +252,18 @@ enum Tools {
     static func wikipedia(_ query: String) -> String {
         let q = [
             "action": "query", "format": "json", "formatversion": "2", "generator": "search", "gsrsearch": query,
-            "gsrlimit": "3", "prop": "extracts", "exintro": "1", "explaintext": "1", "exsentences": "5",
+            "gsrlimit": "2", "prop": "extracts", "exintro": "1", "explaintext": "1", "exsentences": "3",
         ]
         guard let u = url("https://en.wikipedia.org/w/api.php", q), let r = get(u) as? [String: Any]
         else { return json(["error": "Wikipedia unavailable"]) }
         let pages = ((r["query"] as? [String: Any])?["pages"] as? [[String: Any]] ?? [])
             .sorted { ($0["index"] as? Int ?? 0) < ($1["index"] as? Int ?? 0) }
             .map { p -> [String: Any] in
-                let title = p["title"] as? String ?? ""
-                return [
-                    "title": title,
-                    "url": "https://en.wikipedia.org/wiki/" + title.replacingOccurrences(of: " ", with: "_"),
-                    "extract": p["extract"] as? String ?? "",
-                ]
+                // Two articles, three sentences, at most 500 characters each: enough to answer
+                // from, and short to read (the old five-sentence, three-article result was
+                // ~1000 tokens).
+                let extract = p["extract"] as? String ?? ""
+                return ["title": p["title"] as? String ?? "", "extract": String(extract.prefix(500))]
             }
         return pages.isEmpty ? json(["error": "no results for \(query)"]) : json(pages)
     }

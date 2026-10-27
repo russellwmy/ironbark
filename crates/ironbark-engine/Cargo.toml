@@ -23,5 +23,8 @@ ironbark-mlx-sys.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+tokenizers.workspace = true
+
 [lints]
 workspace = true

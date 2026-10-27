@@ -175,6 +175,7 @@ mod tests {
             head_bits: 4,
             head_group: 64,
             flash_head: None,
+            dynamic: crate::dynamic::Dynamic::default(),
         };
         let v: Vec<f32> = (0..vocab * hidden).map(|i| ((i * 7919 % 2003) as f32 - 1000.0) * 1e-3).collect();
         let table = Array::from_slice(&v, &[vocab as i32, hidden as i32]).as_dtype(Dtype::Bfloat16).unwrap();

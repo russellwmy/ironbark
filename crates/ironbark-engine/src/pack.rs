@@ -54,7 +54,7 @@ fn words(a: &Array) -> Result<Vec<u32>> {
 }
 
 /// bf16 bits of an evaluated bf16 array (bf16 -> f32 is exact, so the high half is the value).
-fn bf16_bits(a: &Array) -> Result<Vec<u16>> {
+pub(crate) fn bf16_bits(a: &Array) -> Result<Vec<u16>> {
     let f = a.as_dtype(Dtype::Float32)?;
     f.eval()?;
     Ok(f.as_slice::<f32>().iter().map(|v| (v.to_bits() >> 16) as u16).collect())

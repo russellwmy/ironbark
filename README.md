@@ -8,8 +8,10 @@ Ternary MoE inference on Apple Silicon, in Rust. The target model is **Maple** (
 | M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
 | iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
 | iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
+| M1 Max | Qwen3.6-35B-A3B ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
+| iPhone 17 | Qwen3.6-35B-A3B, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
 
-Greedy decode; M1 Max checkpoint row after a short prompt, the others after a 747–887-token prompt (iPhone: prose). Conditions and all measurements: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md).
+Greedy decode; M1 Max checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose). Conditions and all measurements: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md).
 
 - Matches the reference: perplexity 67.8979 vs 67.8978 ([BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#checkpoint-vs-reference)).
 - Sized to the device: experts that don't fit the budget are streamed from SSD ([Memory budget](#memory-budget)).
@@ -25,10 +27,11 @@ More: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARK
   - [Download options](#download-options)
   - [Expert options](#expert-options)
   - [Examples](#examples)
+  - [Qwen bundles](#qwen-bundles)
   - [Development](#development)
   - [Release](#release)
 - [Usage](#usage)
-  - [Chat](#chat) · [Options](#options) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Experts from a server](#experts-from-a-server)
+  - [Chat](#chat) · [Options](#options) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server)
 - [Tool use](#tool-use)
 - [On-demand experts](#on-demand-experts)
   - [On-demand embedding](#on-demand-embedding)
@@ -80,14 +83,13 @@ Requirements and the short path: [Getting started](#getting-started). Every comm
 | Command | What |
 |---|---|
 | `ironbark download [REPO]` | Download a model from Hugging Face into `~/.ironbark/models` |
-| `ironbark pack --model M --out P` | Turn an MLX checkpoint into a streaming model dir (`experts.bin`, `embed.bin`, other weights, tokenizer, manifest); `--two-bit` for 2-bit expert records |
+| `ironbark pack --model M --out P` | Turn an MLX checkpoint into a streaming model dir (`experts.bin`, `embed.bin`, other weights, tokenizer, manifest); `--two-bit` for 2-bit expert records; for a [Qwen bundle](#qwen-bundles), `--model M` alone packs into `M/pack` |
 | `ironbark verify P` | Check a packed model against its manifest: sizes, file hashes, every expert record |
 | `ironbark gen --model M --prompt "…"` | Greedy decode, with prefill / decode speed and GPU memory; `--gen N` tokens (default 128), `--top N` prints top-5 logits |
-| `ironbark ppl --model M --text FILE` | Perplexity: first half of `--tokens` (default 512) is context, second half is scored; `--batch` for one batched forward |
 | `ironbark profile --model M` | GPU time of each part of a decode step |
 
 ```
- download ──▶ M: MLX checkpoint ──▶ pack ──▶ P: packed model ──▶ verify ──▶ gen / ppl / profile, library, phone
+ download ──▶ M: MLX checkpoint ──▶ pack ──▶ P: packed model ──▶ verify ──▶ gen / profile, library, phone
 ```
 
 ### Download options
@@ -103,7 +105,7 @@ Reruns resume partial files and skip complete ones. Set `HF_TOKEN` for private r
 
 ### Expert options
 
-For `gen`, `ppl` and `profile`:
+For `gen` and `profile`:
 
 | Option | Default | What |
 |---|---|---|
@@ -123,7 +125,6 @@ B=target/release/ironbark
 M=~/.ironbark/models/maple-preview-2bit-mlx   # from: $B download
 P=~/.ironbark/models/maple                    # a packed model: what the library and the phone use
 $B gen --model $M --prompt "The capital of Germany is" --gen 128
-$B ppl --model $M --text prompts/prose.txt --tokens 400
 $B pack --model $M --out $P                   # trit experts (4.0 GB) + other weights, tokenizer, manifest
 $B verify $P                                  # e.g. after copying
 $B gen --model $P --prompt "..." --experts $P             # sized to this machine
@@ -131,6 +132,33 @@ $B gen --model $P --prompt "..." --experts $P --budget 2  # or to a 2 GB footpri
 ```
 
 To use the library from your own code, see [Usage](#usage).
+
+### Qwen bundles
+
+A bundle is how ternary Qwen models are published: the 4-bit MLX checkpoint
+without its experts, and the ternary experts as `experts.safetensors`. Neither format changes
+with the pack version, so you pack it yourself.
+
+```bash
+$B download russellwmy/qwen3.6-35b-a3b-ternary   # ~11 GB
+$B pack --model ~/.ironbark/models/qwen3.6-35b-a3b-ternary
+$B gen  --model ~/.ironbark/models/qwen3.6-35b-a3b-ternary --chat --prompt "Hello"
+```
+
+```
+ qwen3.6-35b-a3b-ternary/
+ ├── config.json, tokenizer*, model.safetensors, …   from the 4-bit checkpoint, no experts
+ ├── experts.safetensors                            ternary experts (codes, group scales)
+ └── pack/                                          written by `pack` (~9 GB)
+```
+
+| Command | On a bundle dir `D` |
+|---|---|
+| `pack --model D` | `--ternary D/experts.safetensors`, `--out D/pack` (both can be given) |
+| `gen` / `profile --model D`, `Session::open(D)` | Load `D/pack`; error if not packed yet |
+
+Packing Qwen3.6-35B-A3B takes about 20 s and 2.9 GB of memory. After a pack version change,
+run `pack` again: it rebuilds `D/pack` from the bundle.
 
 ### Development
 
@@ -208,7 +236,7 @@ fn main() -> ironbark::Result<()> {
 |---|---|---|
 | `budget` | `None`: 3/8 of RAM, at most half the iOS app limit | Footprint budget in bytes |
 | `slots` | `None`: as many as fit the budget | Expert cache slots per layer (256 = all loaded, no streaming) |
-| `max_context` | 4096 | Most tokens per conversation; the budget reserves its KV cache |
+| `max_context` | `None`: Maple 4096; Qwen 16384 if that leaves 48+ expert slots per layer, else 4096 | Most tokens per conversation; the budget reserves its KV cache |
 | `loaders` | 8 | Threads reading experts from storage |
 | `records` | `None`: the dir's `experts.bin` (must be complete) | Where expert records come from, e.g. an `ironbark_fetch::Sparse` |
 
@@ -247,6 +275,33 @@ for _ in 0..3 {                                     // cap the rounds of calls
 | `s.send(&[Message::User(..), Message::Assistant(..), Message::ToolResults(..)])` | Rebuild a conversation from a transcript (after `reset`) |
 | `s.stats()` | Prompt / reply tokens, prefill and decode tok/s, expert hits, footprint |
 | `s.set_lookahead(n)` | Layers of experts prefetched ahead (default 1) |
+| `s.set_dynamic_k(Dynamic { drop_below: 0.08, ..Dynamic::default() })` | Decode drops each token's expert choices under that share of its routing weight, keeping at least 3 (default off); fewer expert reads, different text ([Dynamic top-k](#dynamic-top-k)) |
+
+### Dynamic top-k
+
+Decode can skip the experts a token barely uses. Off by default (the model as trained); prompts always use all 8.
+
+```
+ router: top-8 choices, weights w ─► shares w / Σw ─► drop shares < drop_below (never the 3 largest)
+ dropped choice ─► the token's strongest expert, weight 0 (already loaded: no read;
+                   Qwen streaming also skips its kernels)
+ kept weights   ─► rescaled to the total they had
+```
+
+A higher `drop_below` drops more experts: faster, further from the model as trained.
+
+| | 0.08 | 0.10 |
+|---|---|---|
+| Drops a choice under | 8% of the token's routing weight | 10% |
+| Qwen3.6, iPhone 17 chat (off: 10.9 tok/s, 100 MB read per token) | 12.0 tok/s, 87 MB | 18.4 tok/s, 43 MB |
+| Qwen3.6 quality vs off | Tools 45 / 46, tasks 72 / 80, IFEval (120) 80.0% | Tools 46 / 46, tasks 72 / 80, IFEval (120) 80.0%, full IFEval 74.7% (off: 76.2%) |
+| Maple tasks (off: 59 / 80) | 57 | 52 |
+| Default in the iOS app | Qwen | – |
+
+- Maple keeps it off: it loses tasks at both settings.
+- The 0.08 speed row was measured before lookahead prefetches followed the drop; the 0.10 row after. On raw prompts after that change, Qwen at 0.08 decoded 8–10% slower than off ([BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARKS.md#dynamic-top-k)), so re-measure before choosing by speed.
+- The reply text changes within about the first 20 tokens; each setting is repeatable run to run.
+- Evals (tools, tasks, IFEval): external runs on the ternary packs.
 
 ### Experts from a server
 
@@ -275,7 +330,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Tool use
 
-Maple's chat template (Qwen/Hermes style) lists tools as JSON in the system turn; the model replies with `<tool_call>` blocks and gets results back as `<tool_response>` blocks. The library writes the turns and parses replies; the app runs the tools (search API keys stay in the app).
+Maple's chat template (Hermes style) lists tools as JSON in the system turn; the model replies with `<tool_call>` blocks and gets results back as `<tool_response>` blocks. The library writes the turns and parses replies; the app runs the tools (search API keys stay in the app).
 
 ```
  set_system(Some("Today is …"), &tools) ──▶ chat("weather in Adelaide?") ──▶ <think>…</think><tool_call>{…}</tool_call>
@@ -301,7 +356,7 @@ Notes:
 - Reasoning can run long (a haiku spent 1024+ tokens counting syllables); cap reply tokens in the app.
 - `Session::send` takes a list of messages (`Message::User`, `Assistant`, `ToolResults`): after `reset`, it rebuilds a conversation from a transcript (earlier replies lose their reasoning, as in the template).
 - The iOS chat offers three tools it runs itself, with no API keys: `calculator` (on device), `get_weather` (Open-Meteo) and `wikipedia_search` (Wikipedia API). It answers up to 3 rounds of calls per message, shows each call and result, folds the reasoning away, and renders the answer's Markdown (headings, lists, quotes, code, tables). C API: `ironbark_set_system`, `ironbark_send`, `ironbark_parse`.
-- The model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17, 2026-10-15: 4 of 4 pass at 21–23 tok/s).
+- The model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17: Maple 4 of 4 at 21–23 tok/s, 2026-10-15; Qwen3.6 4 of 4 at 7–9 tok/s, 2026-10-27).
 
 ## On-demand experts
 
@@ -500,7 +555,7 @@ ironbark/
 │   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
 │   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
 │   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
-│   ├── ironbark-cli/       binary `ironbark`: download, pack, verify, gen, ppl, profile
+│   ├── ironbark-cli/       binary `ironbark`: download, pack, verify, gen, profile
 │   ├── ironbark-mlx/       safe Rust API over MLX
 │   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                IronbarkBench: SwiftUI benchmark app (xcodegen)
@@ -522,7 +577,7 @@ ironbark/
 | `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
 | `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
 | `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
-| `ironbark-cli` | The `ironbark` binary: `download`, `pack`, `verify`, `gen`, `ppl`, `profile` (see [Commands](#commands)) |
+| `ironbark-cli` | The `ironbark` binary: `download`, `pack`, `verify`, `gen`, `profile` (see [Commands](#commands)) |
 | `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
 | `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.4 and its Metal kernels for macOS and iOS |
 

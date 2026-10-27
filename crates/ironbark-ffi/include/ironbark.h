@@ -79,12 +79,29 @@ char *ironbark_set_system(IronbarkSession *s, const char *system, const char *to
  * conversation, `reset` first forgets it (to rebuild a transcript); then stream the reply
  * with ironbark_next. Returns the turn's stats. */
 char *ironbark_send(IronbarkSession *s, const char *messages, bool reset);
+/* Qwen: encode an image for the next ironbark_send, shown before its last user message's text.
+ * `rgb` is `height` rows of `width` RGB pixels (3 bytes each, top to bottom), resized to at most
+ * `max_pixels` (0: 512 x 512). The vision encoder loads for this and is freed after. Returns
+ * {tokens, width, height, encode_s} (resized size). */
+char *ironbark_set_image(IronbarkSession *s, const uint8_t *rgb, uint32_t width, uint32_t height,
+                         uint32_t max_pixels);
 /* Whether replies reason first (default on). Off, a reply to a user message answers at once
  * and starts with "</think>"; replies to tool results still reason. The system turn is read
  * once per session and restored for each new conversation. */
 void ironbark_set_thinking(IronbarkSession *s, bool on);
 /* Streaming: layers ahead whose experts each step predicts and prefetches (default 1). */
 void ironbark_set_lookahead(IronbarkSession *s, uint32_t layers);
+/* After a GPU error (e.g. "Insufficient Permission (to submit GPU work from background)"):
+ * run GPU work on a fresh stream, as the failed one fails every later operation. Sessions do
+ * this themselves (and read their conversation again). */
+void ironbark_reset_gpu(void);
+/* Whether replies may call tools (default true). Off, the model cannot start a <tool_call> and
+ * answers with what it has. */
+void ironbark_set_tool_calls(IronbarkSession *s, bool on);
+/* Dynamic top-k: decode drops each token's expert choices whose share of its routing weight is
+ * under drop_below (0: off, the default), keeping at least min_k. Fewer expert reads per token.
+ * Every model (Qwen, Maple); returns true. */
+bool ironbark_set_dynamic_k(IronbarkSession *s, float drop_below, uint32_t min_k);
 /* Decode with FlashHead, DeepGrove's approximate LM head (exact logits only for the top 512
  * of 4748 vocabulary clusters), or the exact head (default). Returns {"available": bool}. */
 char *ironbark_set_flash_head(IronbarkSession *s, bool on);
