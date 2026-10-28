@@ -82,7 +82,8 @@ char *ironbark_send(IronbarkSession *s, const char *messages, bool reset);
 /* Keep a long prompt read across sessions (files are .safetensors; a file of another model or
  * ironbark version is not used).
  * ironbark_read_system_cached: in a new conversation, load the system turn from `path`, else
- * read it and save it there. Returns {read: tokens} (0: loaded, restored or not needed).
+ * read it and save it there. Returns {system, read}: system is "read" (read tokens),
+ * "restored" (kept from an earlier conversation), "loaded" (from the file) or "not_needed".
  * ironbark_save: save the conversation to `path`. Returns {}.
  * ironbark_load: return to a conversation saved at `path`. Returns {loaded: bool} (false:
  * missing or of another model; nothing changes). */
@@ -116,8 +117,8 @@ void ironbark_set_tool_calls(IronbarkSession *s, bool on);
 char *ironbark_set_sampling(IronbarkSession *s, const char *sampling);
 /* Dynamic top-k: decode drops each token's expert choices whose share of its routing weight is
  * under drop_below (0: off, the default), keeping at least min_k. Fewer expert reads per token.
- * Every model (Qwen, Maple); returns true. */
-bool ironbark_set_dynamic_k(IronbarkSession *s, float drop_below, uint32_t min_k);
+ * Every model (Qwen, Maple). */
+void ironbark_set_dynamic_k(IronbarkSession *s, float drop_below, uint32_t min_k);
 /* Decode with FlashHead, DeepGrove's approximate LM head (exact logits only for the top 512
  * of 4748 vocabulary clusters), or the exact head (default). Returns {"available": bool}. */
 char *ironbark_set_flash_head(IronbarkSession *s, bool on);

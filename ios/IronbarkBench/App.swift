@@ -346,7 +346,7 @@ final class Chat: ObservableObject {
         }
         guard let s = session else { return }
         ironbark_set_thinking(s, think)
-        _ = ironbark_set_dynamic_k(s, Float(drop), 3)
+        ironbark_set_dynamic_k(s, Float(drop), 3)
         // The photo goes with this message: encoded now, read with the message below.
         var seen = ""
         if let image {
@@ -868,7 +868,7 @@ final class Bench: ObservableObject {
                     let flashes = self.flag("-flash") ? [false, true] : [false]
                     let drops = (self.arg("-dynamic") ?? "0").split(separator: ",").compactMap { Float($0) }
                     for drop in drops {
-                        _ = ironbark_set_dynamic_k(s, drop, 3)
+                        ironbark_set_dynamic_k(s, drop, 3)
                         for la in lookaheads {
                             ironbark_set_lookahead(s, la)
                             for flash in flashes {
@@ -972,7 +972,7 @@ final class Bench: ObservableObject {
                         guard let s else { self.emit(["model": model, "budget_gb": b, "error": err ?? ""]); continue }
                         _ = take(ironbark_generate(s, "Hello", 4)) // compile the kernels
                         ironbark_set_thinking(s, false)
-                        _ = ironbark_set_dynamic_k(s, drop, 3)
+                        ironbark_set_dynamic_k(s, drop, 3)
                         _ = take(ironbark_set_system(s, "You are a helpful assistant.", "[]"))
                         let t0 = Date()
                         self.emit(["model": model, "drop": drop, "start": power()])

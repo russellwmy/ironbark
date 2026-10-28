@@ -646,6 +646,38 @@ impl Model {
         Ok(KvSnapshot { kv, pos })
     }
 
+    /// Where to [`Model::rewind`] to: the position and the sliding layers (a ring, written
+    /// over); full-attention layers keep their keys up to it. Cheap: arrays shared.
+    #[must_use]
+    pub fn rewind_point(&self) -> KvSnapshot {
+        let kv = (self.kv.iter().zip(&self.layers))
+            .map(|(kv, ly)| if ly.sliding { kv.clone() } else { Kv::default() })
+            .collect();
+        KvSnapshot { kv, pos: self.pos }
+    }
+
+    /// A snapshot of the cache as [`Model::rewind`] to `p` would leave it, without rewinding.
+    #[must_use]
+    pub fn snapshot_at(&self, p: &KvSnapshot) -> KvSnapshot {
+        let kv = (self.kv.iter().zip(&self.layers).zip(&p.kv))
+            .map(|((kv, ly), saved)| if ly.sliding { saved.clone() } else { kv.clone() })
+            .collect();
+        KvSnapshot { kv, pos: p.pos }
+    }
+
+    /// Go back to `p`, a [`Model::rewind_point`] taken since the last reset or restore,
+    /// forgetting the tokens after it.
+    pub fn rewind(&mut self, p: &KvSnapshot) {
+        // A failed wait leaves nothing to protect: the step's output is discarded with it.
+        let _ = self.release_held();
+        for ((kv, ly), saved) in self.kv.iter_mut().zip(&self.layers).zip(&p.kv) {
+            if ly.sliding {
+                kv.clone_from(saved);
+            }
+        }
+        self.pos = p.pos;
+    }
+
     /// Return the KV cache to `s`, taken from this model.
     pub fn restore(&mut self, s: &KvSnapshot) {
         // A failed wait leaves nothing to protect: the step's output is discarded with it.

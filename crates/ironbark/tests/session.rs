@@ -2,7 +2,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 
-use ironbark::{Error, Finish, Options, Sampling, Session};
+use ironbark::{Error, Finish, Options, Sampling, Session, SystemTurn};
 
 /// Greedy, so replies repeat token for token (Qwen samples by default).
 fn open(options: Options) -> Option<Session> {
@@ -45,6 +45,46 @@ fn a_dropped_reply_leaves_the_conversation_usable() {
 }
 
 #[test]
+fn a_reply_dropped_while_reasoning_leaves_no_reasoning() {
+    let Some(mut s) = open(Options::default()) else { return };
+    let ask = "What is the capital of Italy? One word.";
+    for cut in [5, 30] {
+        s.reset();
+        let partial: String = s.chat("Count from 1 to 50.").unwrap().take(cut).map(Result::unwrap).collect();
+        assert!(!partial.contains("</think>"), "{partial}");
+        let next = reply(&mut s, ask);
+        assert!(next.contains("Rome"), "{next}");
+        let context = s.context();
+        // As if the reply had been an empty reasoning and answer, read in the same two parts.
+        s.reset();
+        s.start("<|im_start|>user\nCount from 1 to 50.<|im_end|>\n<|im_start|>assistant\n<think>\n")
+            .unwrap();
+        let rebuilt: String = s
+            .start(&format!(
+                "\n</think>\n\n<|im_end|>\n<|im_start|>user\n{ask}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+            ))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(next, rebuilt);
+        assert_eq!(s.context(), context);
+    }
+}
+
+#[test]
+fn a_snapshot_of_a_reply_dropped_while_reasoning_leaves_no_reasoning() {
+    let Some(mut s) = open(Options::default()) else { return };
+    let ask = "What is the capital of Italy? One word.";
+    let partial: String = s.chat("Count from 1 to 50.").unwrap().take(5).map(Result::unwrap).collect();
+    assert!(!partial.contains("</think>"), "{partial}");
+    let saved = s.snapshot();
+    let direct = reply(&mut s, ask);
+    s.reset();
+    s.restore(&saved);
+    assert_eq!(reply(&mut s, ask), direct);
+}
+
+#[test]
 fn context_cap_is_enforced() {
     let Some(mut s) = open(Options {
         max_context: Some(64),
@@ -63,8 +103,8 @@ fn context_cap_is_enforced() {
 #[test]
 fn generate_is_greedy_and_repeatable() {
     let Some(mut s) = open(Options::default()) else { return };
-    let a = s.generate("The capital of Germany is", 16).unwrap();
-    let b = s.generate("The capital of Germany is", 16).unwrap();
+    let a = s.bench().generate("The capital of Germany is", 16).unwrap();
+    let b = s.bench().generate("The capital of Germany is", 16).unwrap();
     assert_eq!(a.tokens, b.tokens);
     assert_eq!(s.context(), 0);
 }
@@ -176,22 +216,22 @@ fn a_saved_system_turn_stays_read_for_new_conversations() {
     let (first, full) = {
         let Some(mut s) = open(Options::default()) else { return };
         s.set_system(system, &[]);
-        assert!(s.read_system_cached(&path).unwrap() > 0);
-        assert_eq!(s.read_system_cached(&path).unwrap(), 0);
+        assert!(matches!(s.read_system_cached(&path).unwrap(), SystemTurn::Read(n) if n > 0));
+        assert_eq!(s.read_system_cached(&path).unwrap(), SystemTurn::Restored);
         let first = reply(&mut s, "Name a primary colour. One word.");
         (first, s.context())
     };
     let mut s = open(Options::default()).unwrap();
     s.set_system(system, &[]);
-    assert_eq!(s.read_system_cached(&path).unwrap(), 0);
+    assert_eq!(s.read_system_cached(&path).unwrap(), SystemTurn::Loaded);
     // A new conversation after the load still finds the system turn read.
     s.reset();
-    assert_eq!(s.read_system().unwrap(), 0);
+    assert_eq!(s.read_system().unwrap(), SystemTurn::Restored);
     assert_eq!(reply(&mut s, "Name a primary colour. One word."), first);
     assert_eq!(s.context(), full);
     // Another system turn is read, and replaces the file.
     s.set_system(Some("You are verbose."), &[]);
-    assert!(s.read_system_cached(&path).unwrap() > 0);
+    assert!(matches!(s.read_system_cached(&path).unwrap(), SystemTurn::Read(_)));
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -206,10 +246,10 @@ fn a_broken_file_is_a_snapshot_error() {
     let Some(mut s) = open(Options::default()) else { return };
     let path = snapshot_file("broken");
     std::fs::write(&path, b"not safetensors").unwrap();
-    assert!(matches!(s.load(&path), Err(ironbark::Error::Snapshot(_))));
+    assert!(matches!(s.load(&path), Err(Error::Snapshot(_))));
     // read_system_cached reads the system turn instead, and replaces the file.
     s.set_system(Some("You are terse."), &[]);
-    assert!(s.read_system_cached(&path).unwrap() > 0);
+    assert!(matches!(s.read_system_cached(&path).unwrap(), SystemTurn::Read(_)));
     assert!(s.load(&path).unwrap());
     std::fs::remove_file(&path).unwrap();
 }
@@ -235,7 +275,7 @@ fn embed_fetched_on_demand_decodes_the_same() {
         return;
     }
     let mut local = open(Options::default()).unwrap();
-    let want = local.generate("The capital of Germany is", 16).unwrap();
+    let want = local.bench().generate("The capital of Germany is", 16).unwrap();
     drop(local);
 
     // A client dir with everything but embed.bin, which fills from the model's copy.
@@ -259,7 +299,7 @@ fn embed_fetched_on_demand_decodes_the_same() {
         },
     )
     .unwrap();
-    let got = s.generate("The capital of Germany is", 16).unwrap();
+    let got = s.bench().generate("The capital of Germany is", 16).unwrap();
     assert_eq!(got.tokens, want.tokens);
     // Only the rows these tokens use were fetched.
     let p = embed.progress();

@@ -37,6 +37,14 @@ pub(crate) enum Cache {
 }
 
 impl Cache {
+    /// Tokens in the caches.
+    pub(crate) fn pos(&self) -> usize {
+        match self {
+            Cache::Maple(c) => c.pos(),
+            Cache::Qwen(c) => c.pos(),
+        }
+    }
+
     /// The caches by name, the position and the rotary offset (Maple: 0), to save.
     pub(crate) fn parts(&self) -> (Vec<(String, Array)>, usize, i64) {
         match self {
@@ -134,6 +142,32 @@ impl Engine {
         }
     }
 
+    /// Where to [`Engine::rewind`] to (not a cache to restore).
+    pub(crate) fn rewind_point(&self) -> Cache {
+        match self {
+            Engine::Maple(m) => Cache::Maple(m.rewind_point()),
+            Engine::Qwen(m) => Cache::Qwen(m.rewind_point()),
+        }
+    }
+
+    /// A cache as [`Engine::rewind`] to `p` would leave it, without rewinding.
+    pub(crate) fn snapshot_at(&self, p: &Cache) -> Cache {
+        match (self, p) {
+            (Engine::Maple(m), Cache::Maple(p)) => Cache::Maple(m.snapshot_at(p)),
+            (Engine::Qwen(m), Cache::Qwen(p)) => Cache::Qwen(m.snapshot_at(p)),
+            _ => unreachable!("a rewind point is used in the model it came from"),
+        }
+    }
+
+    /// Go back to `p` from [`Engine::rewind_point`], forgetting the tokens after it.
+    pub(crate) fn rewind(&mut self, p: &Cache) {
+        match (self, p) {
+            (Engine::Maple(m), Cache::Maple(p)) => m.rewind(p),
+            (Engine::Qwen(m), Cache::Qwen(p)) => m.rewind(p),
+            _ => unreachable!("a rewind point is used in the model it came from"),
+        }
+    }
+
     /// Return to `c`, taken from this engine.
     pub(crate) fn restore(&mut self, c: &Cache) {
         match (self, c) {
@@ -158,13 +192,12 @@ impl Engine {
         }
     }
 
-    /// Dynamic top-k (Qwen, Maple). Returns true (every model has it).
-    pub(crate) fn set_dynamic(&mut self, d: Dynamic) -> bool {
+    /// Dynamic top-k (Qwen, Maple).
+    pub(crate) fn set_dynamic(&mut self, d: Dynamic) {
         match self {
             Engine::Maple(m) => m.cfg.dynamic = d,
             Engine::Qwen(m) => m.cfg.dynamic = d,
         }
-        true
     }
 
     /// FlashHead on or off; false if the model has none.

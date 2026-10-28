@@ -79,6 +79,11 @@ impl Sampler {
         std::iter::once(&self.key).chain(&self.seen)
     }
 
+    /// Tokens never picked ([`Sampler::ban`]).
+    pub(crate) fn banned(&self) -> &[u32] {
+        &self.banned
+    }
+
     /// Never pick `tokens` (none: no ban).
     pub(crate) fn ban(&mut self, tokens: &[u32]) {
         if self.banned != tokens {

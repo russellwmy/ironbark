@@ -665,6 +665,54 @@ impl Model {
         Ok(Snapshot { state, pos, delta })
     }
 
+    /// Where to [`Model::rewind`] to: the position and the DeltaNet states (recurrent);
+    /// full-attention layers keep their keys up to it. Cheap: arrays shared.
+    #[must_use]
+    pub fn rewind_point(&self) -> Snapshot {
+        let state = (self.state.iter())
+            .map(|s| match s {
+                State::Delta(_) => s.clone(),
+                State::Kv { .. } => State::Kv { k: None, v: None },
+            })
+            .collect();
+        Snapshot {
+            state,
+            pos: self.pos,
+            delta: self.delta,
+        }
+    }
+
+    /// A snapshot of the caches as [`Model::rewind`] to `p` would leave them, without
+    /// rewinding.
+    #[must_use]
+    pub fn snapshot_at(&self, p: &Snapshot) -> Snapshot {
+        let state = (self.state.iter().zip(&p.state))
+            .map(|(now, saved)| match saved {
+                State::Delta(_) => saved.clone(),
+                State::Kv { .. } => now.clone(),
+            })
+            .collect();
+        Snapshot {
+            state,
+            pos: p.pos,
+            delta: p.delta,
+        }
+    }
+
+    /// Go back to `p`, a [`Model::rewind_point`] taken since the last reset or restore,
+    /// forgetting the tokens after it.
+    pub fn rewind(&mut self, p: &Snapshot) {
+        // A failed wait leaves nothing to protect: the output is discarded with it.
+        let _ = self.release_held();
+        for (s, saved) in self.state.iter_mut().zip(&p.state) {
+            if let State::Delta(_) = saved {
+                s.clone_from(saved);
+            }
+        }
+        self.pos = p.pos;
+        self.delta = p.delta;
+    }
+
     /// Return to a [`Snapshot`].
     pub fn restore(&mut self, s: &Snapshot) {
         // A failed wait leaves nothing to protect: the output is discarded with it.

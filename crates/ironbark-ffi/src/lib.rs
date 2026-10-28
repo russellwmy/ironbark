@@ -18,7 +18,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ironbark::{Chunks, ExpertStats, Hardware, Options, Records};
+use ironbark::{Chunks, ExpertStats, Hardware, Options, Records, SystemTurn};
 use ironbark_engine::bench;
 use ironbark_fetch::{Fetch, Sparse};
 use serde_json::{Value, json};
@@ -76,9 +76,9 @@ fn experts_json(x: &ExpertStats) -> Value {
 }
 
 fn generate(s: &mut ironbark::Session, prompt: &str, n: usize) -> Result<Value> {
-    let g = s.generate(prompt, n).map_err(|e| e.to_string())?;
+    let g = s.bench().generate(prompt, n).map_err(|e| e.to_string())?;
     let text = s.decode(&g.tokens).map_err(|e| e.to_string())?;
-    let experts = s.expert_stats(g.tokens.len()).map(|x| experts_json(&x));
+    let experts = s.bench().expert_stats(g.tokens.len()).map(|x| experts_json(&x));
     Ok(json!({
         "prompt_tokens": g.prompt,
         "prefill_s": g.prefill_s,
@@ -529,10 +529,10 @@ pub unsafe extern "C" fn ironbark_probe(dir: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ironbark_profile(s: *mut Session) -> *mut c_char {
     // SAFETY: the caller guarantees `s` is a live session used by this thread only.
-    let s = unsafe { s.as_ref() };
+    let s = unsafe { s.as_mut() };
     report(|| {
         let s = s.ok_or("null session")?;
-        let p = s.0.profile(200).map_err(|e| e.to_string())?;
+        let p = s.0.bench().profile(200).map_err(|e| e.to_string())?;
         let parts: Vec<Value> =
             p.parts.iter().map(|(name, us, n)| json!({ "part": name, "us": us, "per_token": n })).collect();
         Ok(json!({ "parts": parts, "token_us": p.token_us, "plan": plan_json(&s.0) }))
@@ -570,7 +570,11 @@ pub unsafe extern "C" fn ironbark_start(s: *mut Session, text: *const c_char, re
     let s = unsafe { s.as_mut() };
     report(|| {
         let s = &mut s.ok_or("null session")?.0;
-        s.start(text?, reset).map_err(|e| e.to_string())?;
+        let text = text?;
+        if reset {
+            s.reset();
+        }
+        s.start(text).map_err(|e| e.to_string())?;
         Ok(stats(s))
     })
 }
@@ -656,20 +660,22 @@ pub unsafe extern "C" fn ironbark_set_tool_calls(s: *mut Session, on: bool) {
 
 /// Dynamic top-k: decode drops each token's expert choices whose share of its routing weight is
 /// under `drop_below` (0: off, the default), keeping at least `min_k`. Fewer expert reads per
-/// token. Every model (Qwen, Maple); returns true.
+/// token. Every model (Qwen, Maple).
 ///
 /// # Safety
 ///
 /// `s` comes from [`ironbark_open`] and is not used concurrently.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn ironbark_set_dynamic_k(s: *mut Session, drop_below: f32, min_k: u32) -> bool {
+pub unsafe extern "C" fn ironbark_set_dynamic_k(s: *mut Session, drop_below: f32, min_k: u32) {
     let d = ironbark::Dynamic {
         drop_below,
         min_k: min_k as usize,
         ..ironbark::Dynamic::default()
     };
     // SAFETY: the caller guarantees `s` is a live session used by this thread only.
-    unsafe { s.as_mut() }.is_some_and(|s| s.0.set_dynamic_k(d))
+    if let Some(s) = unsafe { s.as_mut() } {
+        s.0.set_dynamic_k(d);
+    }
 }
 
 /// Decode with FlashHead (approximate LM head) or the exact head (default). Returns
@@ -727,7 +733,9 @@ pub unsafe extern "C" fn ironbark_set_sampling(s: *mut Session, sampling: *const
 
 /// In a new conversation, put the system turn ([`ironbark_set_system`]) in the KV cache from
 /// the file at `path` when it was saved there, else read it and save it to `path` for the next
-/// session. Returns `{"read": tokens}` (0: loaded, restored or not needed).
+/// session. Returns `{"system": how, "read": tokens}`, `how` one of `"read"`, `"restored"`
+/// (kept from an earlier conversation), `"loaded"` (from the file) or `"not_needed"` (in a
+/// conversation, or without a system turn).
 ///
 /// # Safety
 ///
@@ -741,7 +749,14 @@ pub unsafe extern "C" fn ironbark_read_system_cached(s: *mut Session, path: *con
     let s = unsafe { s.as_mut() };
     report(|| {
         let s = &mut s.ok_or("null session")?.0;
-        Ok(json!({ "read": s.read_system_cached(path?).map_err(|e| e.to_string())? }))
+        let (how, read) = match s.read_system_cached(path?).map_err(|e| e.to_string())? {
+            SystemTurn::Read(n) => ("read", n),
+            SystemTurn::Restored => ("restored", 0),
+            SystemTurn::Loaded => ("loaded", 0),
+            SystemTurn::NotNeeded => ("not_needed", 0),
+            _ => ("other", 0),
+        };
+        Ok(json!({ "system": how, "read": read }))
     })
 }
 

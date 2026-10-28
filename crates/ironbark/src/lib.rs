@@ -45,7 +45,7 @@ pub use ironbark_engine::dynamic::Dynamic;
 pub use ironbark_engine::manifest::{Report, verify};
 pub use ironbark_engine::plan::Plan;
 pub use ironbark_engine::profile::Profile;
-pub use ironbark_engine::{Config, KvSnapshot, Model, pack};
+pub use ironbark_engine::{Config, pack};
 pub use ironbark_experts::{Chunks, Records};
 pub use sample::Sampling;
 pub use serde_json::{Value, json};
@@ -57,6 +57,7 @@ pub mod tools;
 
 /// Errors of a session.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Loading or running the model failed.
     #[error(transparent)]
@@ -125,6 +126,7 @@ impl Default for Options {
 
 /// Why a reply ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Finish {
     /// The model ended its turn.
     Stop,
@@ -134,6 +136,7 @@ pub enum Finish {
 
 /// Speed and memory of the current turn.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TurnStats {
     /// Tokens read for this turn.
     pub prompt_tokens: usize,
@@ -163,13 +166,31 @@ struct Turn {
     prefix: String,
     prompt: usize,
     prefill_s: f64,
+    /// While the reply reasons: where its reasoning began (a rewind point and the tokens in
+    /// the conversation), to go back to if it is dropped ([`Session::drop_reasoning`]).
+    reasoning: Option<(Cache, usize)>,
     decode_start: Instant,
     decode_s: f64,
     finish: Option<Finish>,
 }
 
+/// How [`Session::read_system`] put the system turn in the KV cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SystemTurn {
+    /// Read now: this many tokens.
+    Read(usize),
+    /// Kept from an earlier conversation.
+    Restored,
+    /// From the file of [`Session::read_system_cached`].
+    Loaded,
+    /// Nothing to do: in a conversation, or without a system turn.
+    NotNeeded,
+}
+
 /// An image encoded for the next user message ([`Session::set_image`]).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ImageInfo {
     /// Tokens it takes in the prompt.
     pub tokens: usize,
@@ -186,6 +207,10 @@ pub const IMAGE_PIXELS: usize = 512 * 512;
 
 /// Most system turns kept read ([`Session::set_system`]), so switching between them is cheap.
 const SYSTEM_KVS: usize = 4;
+
+/// How the next turn closes a reply dropped while reasoning, after its reasoning was dropped:
+/// as an empty reasoning and answer ([`Session::drop_reasoning`]).
+const CLOSE_REASONING: &str = "\n</think>\n\n<|im_end|>\n";
 
 /// Format of a saved conversation ([`Session::save`]); another one is not loaded.
 const SNAPSHOT_FORMAT: &str = "ironbark-snapshot-1";
@@ -222,6 +247,8 @@ pub struct Session {
     max_context: usize,
     /// Tokens that end the model's turn.
     stop: Vec<u32>,
+    /// The token that ends a reply's reasoning.
+    think_end: Option<u32>,
     turn: Option<Turn>,
     /// The KV cache holds a conversation in Maple's chat format.
     chatting: bool,
@@ -253,11 +280,13 @@ pub struct Session {
 }
 
 /// What a saved snapshot must match: this crate's version and the model's files (its
-/// manifest, else its config).
+/// manifest, else its config, else its path).
 fn fingerprint(dir: &Path) -> String {
     let bytes = std::fs::read(dir.join("manifest.json"))
         .or_else(|_| std::fs::read(dir.join("config.json")))
-        .unwrap_or_default();
+        .unwrap_or_else(|_| {
+            dir.canonicalize().unwrap_or_else(|_| dir.to_owned()).to_string_lossy().as_bytes().to_vec()
+        });
     // FNV-1a: the same in every build, unlike `DefaultHasher`.
     let hash = bytes
         .iter()
@@ -308,6 +337,7 @@ impl Session {
         let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(tok_err)?;
         let format = if model.is_qwen() { Format::Qwen } else { Format::Maple };
         let stop = ["<|im_end|>", "<|endoftext|>"].iter().filter_map(|t| tok.token_to_id(t)).collect();
+        let think_end = tok.token_to_id("</think>");
         Ok(Self {
             model,
             tok,
@@ -315,6 +345,7 @@ impl Session {
             hw,
             max_context,
             stop,
+            think_end,
             turn: None,
             chatting: false,
             system: String::new(),
@@ -344,25 +375,15 @@ impl Session {
         &self.hw
     }
 
-    /// The Maple model, for lower-level use (`ironbark-engine`); `None` for the other models.
-    #[must_use]
-    pub fn model(&self) -> Option<&Model> {
-        match &self.model {
-            Engine::Maple(m) => Some(m),
-            Engine::Qwen(_) => None,
-        }
-    }
-
     /// The model is Qwen3.5 / 3.6.
     #[must_use]
     pub fn is_qwen(&self) -> bool {
         self.model.is_qwen()
     }
 
-    /// Expert cache counters over `tokens` decoded tokens.
-    #[must_use]
-    pub fn expert_stats(&self, tokens: usize) -> Option<ExpertStats> {
-        self.model.expert_stats(tokens)
+    /// Benchmarks and diagnostics ([`Bench`]).
+    pub fn bench(&mut self) -> Bench<'_> {
+        Bench { session: self }
     }
 
     /// Tokens in the conversation (the KV cache).
@@ -403,6 +424,21 @@ impl Session {
     /// side conversation on another system turn). Cheap: the KV cache is shared, not copied.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
+        // A reply still reasoning is saved as if dropped ([`Session::drop_reasoning`]); it goes on
+        // here.
+        let open = self.turn.as_ref().filter(|t| t.finish.is_none());
+        if let Some((point, ids)) = open.and_then(|t| t.reasoning.as_ref()) {
+            let kv = self.model.snapshot_at(point);
+            return Snapshot {
+                context: kv.pos(),
+                kv,
+                ids: self.ids[..*ids].to_vec(),
+                image: self.image_read,
+                system: self.system.clone(),
+                chatting: true,
+                close: CLOSE_REASONING,
+            };
+        }
         Snapshot {
             kv: self.model.snapshot(),
             ids: self.ids.clone(),
@@ -454,8 +490,7 @@ impl Session {
 
     /// In a new conversation, put the system turn in the KV cache from `path` when it was
     /// saved there, else read it ([`Session::read_system`]) and save it to `path` for the next
-    /// session. Call after [`Session::set_system`]. Returns the tokens read (0 when loaded or
-    /// restored, in a conversation, or without a system turn).
+    /// session. Call after [`Session::set_system`].
     ///
     /// A file that is missing, broken, or holds another model or system turn is replaced.
     ///
@@ -463,7 +498,7 @@ impl Session {
     ///
     /// Fails if the system turn does not fit the context, the model fails, or the file cannot
     /// be written.
-    pub fn read_system_cached(&mut self, path: impl AsRef<Path>) -> Result<usize> {
+    pub fn read_system_cached(&mut self, path: impl AsRef<Path>) -> Result<SystemTurn> {
         let path = path.as_ref();
         let kept = self.system_kvs.iter().any(|(text, ..)| *text == self.system);
         if self.chatting || self.system.is_empty() || kept {
@@ -475,7 +510,7 @@ impl Session {
             if system_alone {
                 self.restore(&s);
                 self.keep_system(s.system, s.kv, s.ids);
-                return Ok(0);
+                return Ok(SystemTurn::Loaded);
             }
         }
         let read = self.read_system()?;
@@ -523,6 +558,7 @@ impl Session {
             "" => "",
             "\n" => "\n",
             "<|im_end|>\n" => "<|im_end|>\n",
+            CLOSE_REASONING => CLOSE_REASONING,
             _ => return Err(snapshot_err("bad close")),
         };
         let delta = get("delta").parse::<i64>().map_err(|_| snapshot_err("bad delta"))?;
@@ -549,10 +585,11 @@ impl Session {
     /// Fails if the messages are empty or do not fit the context left, or the model fails.
     pub fn read(&mut self, messages: &[Message<'_>]) -> Result<usize> {
         let turns: String = messages.iter().map(Message::turn).collect();
+        self.drop_reasoning();
         let close = self.closing();
         self.open_system()?;
         let reset = !self.chatting && self.system.is_empty();
-        let read = self.start(&format!("{close}{turns}"), reset)?;
+        let read = self.read_text(&format!("{close}{turns}"), reset)?;
         self.turn = None;
         self.chatting = true;
         // The turns end with their end token and line break.
@@ -562,14 +599,36 @@ impl Session {
 
     /// In a new conversation, read the system turn now (or restore it when read recently),
     /// so the first message does not wait for it (to keep it across sessions,
-    /// [`Session::read_system_cached`]). Returns the tokens read (0 when restored, in a
-    /// conversation, or without a system turn).
+    /// [`Session::read_system_cached`]).
     ///
     /// # Errors
     ///
     /// Fails if the system turn does not fit the context, or the model fails.
-    pub fn read_system(&mut self) -> Result<usize> {
-        Ok(self.open_system()?.0)
+    pub fn read_system(&mut self) -> Result<SystemTurn> {
+        if self.chatting || self.system.is_empty() {
+            return Ok(SystemTurn::NotNeeded);
+        }
+        Ok(match self.open_system()?.0 {
+            0 => SystemTurn::Restored,
+            n => SystemTurn::Read(n),
+        })
+    }
+
+    /// A reply dropped while it still reasoned: forget its reasoning, closed as empty
+    /// ([`CLOSE_REASONING`]). Left in, the model cuts its next reasoning the same way (greedy
+    /// Qwen stopped at the same point, without an answer).
+    fn drop_reasoning(&mut self) {
+        let Some(turn) = self.turn.as_mut() else { return };
+        if turn.finish.is_some() {
+            return;
+        }
+        let Some((point, ids)) = turn.reasoning.take() else {
+            return;
+        };
+        self.model.rewind(&point);
+        self.ids.truncate(ids);
+        self.turn = None;
+        self.close = Some(CLOSE_REASONING);
     }
 
     /// How the next turn closes the last one: nothing in a new conversation; its end token
@@ -603,7 +662,7 @@ impl Session {
             return Ok((0, 0.0));
         }
         let system = self.system.clone();
-        let tokens = self.start(&system, true)?;
+        let tokens = self.read_text(&system, true)?;
         let read_s = self.turn.as_ref().map_or(0.0, |t| t.prefill_s);
         self.turn = None;
         self.keep_system(system, self.model.snapshot(), self.ids.clone());
@@ -618,13 +677,8 @@ impl Session {
         self.system_kvs.push((system, kv, ids));
     }
 
-    /// Benchmark: from an empty context, read `prompt` and generate `tokens` tokens greedily,
-    /// with timings. Forgets any conversation.
-    ///
-    /// # Errors
-    ///
-    /// Fails if the prompt is empty or does not fit, or the model fails.
-    pub fn generate(&mut self, prompt: &str, tokens: usize) -> Result<Generation> {
+    /// [`Bench::generate`].
+    fn generate(&mut self, prompt: &str, tokens: usize) -> Result<Generation> {
         self.reset();
         let ids = self.encode(prompt)?;
         if ids.len() + tokens > self.max_context {
@@ -654,9 +708,9 @@ impl Session {
     }
 
     /// Dynamic top-k: decode drops each token's weak expert choices (fewer reads), within
-    /// `d` ([`Dynamic`]; its default is off). Every model (Qwen, Maple). Returns true.
-    pub fn set_dynamic_k(&mut self, d: Dynamic) -> bool {
-        self.model.set_dynamic(d)
+    /// `d` ([`Dynamic`]; its default is off). Every model (Qwen, Maple).
+    pub fn set_dynamic_k(&mut self, d: Dynamic) {
+        self.model.set_dynamic(d);
     }
 
     /// Decode with FlashHead, DeepGrove's approximate LM head (exact logits only for the top
@@ -678,11 +732,23 @@ impl Session {
         self.think = on;
     }
 
+    /// Whether replies reason before answering ([`Session::set_thinking`]).
+    #[must_use]
+    pub fn thinking(&self) -> bool {
+        self.think
+    }
+
     /// Whether replies may call tools (the default). Off, the model cannot start a
     /// `<tool_call>`, so it answers with what it has (e.g. after a limit of tool rounds).
     pub fn set_tool_calls(&mut self, on: bool) {
         let call = self.tok.token_to_id("<tool_call>");
         self.sampler.ban(&if on { None } else { call }.into_iter().collect::<Vec<_>>());
+    }
+
+    /// Whether replies may call tools ([`Session::set_tool_calls`]).
+    #[must_use]
+    pub fn tool_calls(&self) -> bool {
+        self.tok.token_to_id("<tool_call>").is_none_or(|call| !self.sampler.banned().contains(&call))
     }
 
     /// Choose next tokens this way; `None`: the model's own (greedy for Maple, [`Sampling::QWEN`]
@@ -753,6 +819,7 @@ impl Session {
     /// (`after_results`: they end with tool results).
     fn open_turn(&mut self, turn: &str, after_results: bool) -> Result<Reply<'_>> {
         // Close the previous turn (see `closing`).
+        self.drop_reasoning();
         let close = self.closing();
         // A new conversation starts from the system turn, read once and then restored.
         let (system_tokens, system_s) = self.open_system()?;
@@ -762,12 +829,14 @@ impl Session {
         let reasoning = if think { "<think>\n" } else { "<think>\n\n</think>\n\n" };
         let text = format!("{close}{turn}<|im_start|>assistant\n{reasoning}");
         let reset = !self.chatting && self.system.is_empty();
-        self.start(&text, reset)?;
+        self.read_text(&text, reset)?;
         if let Some(t) = &mut self.turn {
             // The turn's stats count the system turn when it was read for it.
             t.prompt += system_tokens;
             t.prefill_s += system_s;
-            if !think {
+            if think {
+                t.reasoning = Some((self.model.rewind_point(), self.ids.len()));
+            } else {
                 // The reply is shown from the end of its (empty) reasoning, as parse expects.
                 t.prefix = "</think>\n\n".into();
             }
@@ -777,13 +846,19 @@ impl Session {
         Ok(Reply { session: self })
     }
 
-    /// Read `text` after the conversation (or from scratch with `reset`); the reply starts at
-    /// the next [`Session::next_piece`]. For prompt formats other than [`Session::chat`]'s.
+    /// Read `text` after the conversation ([`Session::reset`] first for a new one) and stream
+    /// the reply, for prompt formats other than [`Session::chat`]'s.
     ///
     /// # Errors
     ///
     /// Fails if the text is empty or does not fit the context left, or the model fails.
-    pub fn start(&mut self, text: &str, reset: bool) -> Result<usize> {
+    pub fn start(&mut self, text: &str) -> Result<Reply<'_>> {
+        self.read_text(text, false)?;
+        Ok(Reply { session: self })
+    }
+
+    /// [`Session::start`], from scratch with `reset` (after checking `text`).
+    fn read_text(&mut self, text: &str, reset: bool) -> Result<usize> {
         match self.start_once(text, reset) {
             Err(e) if self.recoverable(&e) => {
                 self.recover()?;
@@ -836,6 +911,7 @@ impl Session {
             prefix: String::new(),
             prompt: ids.len(),
             prefill_s,
+            reasoning: None,
             decode_start: Instant::now(),
             decode_s: 0.0,
             finish: None,
@@ -843,7 +919,8 @@ impl Session {
         Ok(ids.len())
     }
 
-    /// The next piece of the reply: `Some("")` while a character is still incomplete, `None`
+    /// The next piece of the reply, for callers that cannot hold a [`Reply`] (e.g. the C API;
+    /// a `Reply` yields the same): `Some("")` while a character is still incomplete, `None`
     /// once it ended ([`Session::finish`] says why).
     ///
     /// # Errors
@@ -888,6 +965,9 @@ impl Session {
             turn.finish = Some(Finish::Stop);
             return Ok(None);
         }
+        if Some(tok) == self.think_end {
+            turn.reasoning = None;
+        }
         turn.tokens.push(tok);
         let text = self.tok.decode(&turn.tokens, true).map_err(tok_err)?;
         // A multi-byte character split across tokens decodes as U+FFFD until it completes.
@@ -912,8 +992,14 @@ impl Session {
     fn recover(&mut self) -> Result<()> {
         reset_gpu();
         self.model.discard();
+        // A fresh random key (the old one's arrays fail too), with the same bans.
+        let banned = self.sampler.banned().to_vec();
         self.sampler = Sampler::new(seed())?;
+        self.sampler.ban(&banned);
         self.system_kvs.clear();
+        if let Some(turn) = &mut self.turn {
+            turn.reasoning = None;
+        }
         if self.ids.is_empty() {
             return Ok(());
         }
@@ -994,18 +1080,45 @@ impl Session {
         }
     }
 
-    /// GPU time of each part of a decode step.
+}
+
+/// Benchmarks and diagnostics of a session ([`Session::bench`]), apart from chat.
+#[derive(Debug)]
+pub struct Bench<'a> {
+    session: &'a mut Session,
+}
+
+impl Bench<'_> {
+    /// From an empty context, read `prompt` and generate `tokens` tokens greedily, with
+    /// timings. Forgets the conversation.
     ///
     /// # Errors
     ///
-    /// Fails if an MLX operation fails.
+    /// Fails if the prompt is empty or does not fit, or the model fails.
+    pub fn generate(&mut self, prompt: &str, tokens: usize) -> Result<Generation> {
+        self.session.generate(prompt, tokens)
+    }
+
+    /// Expert cache counters over the last `tokens` decoded tokens (e.g. after
+    /// [`Bench::generate`], which is not a turn; in a turn, [`TurnStats::experts`]).
+    #[must_use]
+    pub fn expert_stats(&self, tokens: usize) -> Option<ExpertStats> {
+        self.session.model.expert_stats(tokens)
+    }
+
+    /// GPU time of each part of a decode step (Maple).
+    ///
+    /// # Errors
+    ///
+    /// Fails for Qwen, or if an MLX operation fails.
     pub fn profile(&self, reps: usize) -> Result<Profile> {
-        self.model.profile(reps)
+        self.session.model.profile(reps)
     }
 }
 
-/// A reply streamed piece by piece (from [`Session::chat`]); dropping it early leaves the
-/// conversation usable.
+/// A reply streamed piece by piece (from [`Session::chat`], [`Session::send`],
+/// [`Session::tool_results`] or [`Session::start`]); dropping it early leaves the conversation
+/// usable.
 #[derive(Debug)]
 pub struct Reply<'a> {
     session: &'a mut Session,
@@ -1016,6 +1129,12 @@ impl Reply<'_> {
     #[must_use]
     pub fn finish(&self) -> Option<Finish> {
         self.session.finish()
+    }
+
+    /// Speed and memory of the reply so far ([`Session::stats`]).
+    #[must_use]
+    pub fn stats(&self) -> TurnStats {
+        self.session.stats()
     }
 }
 
