@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT OR Apache-2.0"
@@ -54,12 +54,12 @@ lossy_float_literal = "warn"
 float_cmp_const = "warn"
 
 [workspace.dependencies]
-ironbark = { version = "0.2.0", path = "crates/ironbark" }
-ironbark-experts = { version = "0.2.0", path = "crates/ironbark-experts" }
-ironbark-fetch = { version = "0.2.0", path = "crates/ironbark-fetch" }
-ironbark-engine = { version = "0.2.0", path = "crates/ironbark-engine" }
-ironbark-mlx = { version = "0.2.0", path = "crates/ironbark-mlx" }
-ironbark-mlx-sys = { version = "0.2.0", path = "crates/ironbark-mlx-sys" }
+ironbark = { version = "0.3.0", path = "crates/ironbark" }
+ironbark-experts = { version = "0.3.0", path = "crates/ironbark-experts" }
+ironbark-fetch = { version = "0.3.0", path = "crates/ironbark-fetch" }
+ironbark-engine = { version = "0.3.0", path = "crates/ironbark-engine" }
+ironbark-mlx = { version = "0.3.0", path = "crates/ironbark-mlx" }
+ironbark-mlx-sys = { version = "0.3.0", path = "crates/ironbark-mlx-sys" }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 half = "2"
