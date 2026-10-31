@@ -878,6 +878,41 @@ impl Model {
         });
     }
 
+    /// Run layer `l`'s experts from the MLX checkpoint `dir` (any bits) instead of the store,
+    /// or from the store again with `None`: what one layer's ternary costs.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the experts are resident (not streamed), `l` is out of range, the checkpoint
+    /// lacks the layer's experts or an MLX operation fails.
+    pub fn float_layer(&mut self, l: usize, dir: Option<&Path>) -> Result<()> {
+        if self.stream.is_none() {
+            return Err(Error::Format("float_layer: the experts are resident".into()));
+        }
+        if l >= self.layers.len() {
+            return Err(Error::Format(format!("float_layer: no layer {l}")));
+        }
+        let experts = match dir {
+            None => None,
+            Some(dir) => {
+                let g = Config::read(dir)?.group;
+                let mut t = Tensors(load_tensors(dir)?);
+                let n = |m: &str| format!("{PREFIX}.layers.{l}.mlp.switch_mlp.{m}_proj");
+                let ex = Experts {
+                    gate: t.qmat(&n("gate"), g)?,
+                    up: t.qmat(&n("up"), g)?,
+                    down: t.qmat(&n("down"), g)?,
+                };
+                ironbark_mlx::transforms::eval(
+                    [&ex.gate, &ex.up, &ex.down].into_iter().flat_map(|q| [&q.w, &q.scales, &q.biases]),
+                )?;
+                Some(ex)
+            }
+        };
+        self.layers[l].experts = experts;
+        Ok(())
+    }
+
     /// Route only to the experts `keep[l]` of each layer `l` (as a model with the rest pruned
     /// would), or to every expert with `None`.
     ///
@@ -934,6 +969,63 @@ impl Model {
         let x = ly.experts.as_ref().ok_or_else(|| Error::Format("experts are not resident".into()))?;
         let dq = |m: &QMat| -> Result<Array> { Ok(dequantize(&m.w, &m.scales, &m.biases, m.group, m.bits)?) };
         Ok([dq(&x.gate)?, dq(&x.up)?, dq(&x.down)?])
+    }
+
+    /// The token embeddings of `ids` → `[1, L, hidden]` (lazy).
+    ///
+    /// # Errors
+    ///
+    /// Fails if an MLX operation fails.
+    pub fn embed(&self, ids: &[u32]) -> Result<Array> {
+        Ok(self.embed_ids(&Array::from_slice(ids, &[ids.len() as i32]))?.expand_dims(0)?)
+    }
+
+    /// Layer `l` on whole sequences `h` `[1, L, hidden]` (from position 0, a fresh state, the
+    /// caches left alone) with its routed experts `ex` (gate, up, down: each MLX affine
+    /// weights, scales and biases at `bits`) → the residual after it (lazy). With `kernel` the
+    /// DeltaNet recurrence is one Metal launch; without, MLX ops, so the whole layer is
+    /// differentiable in `h` and the experts' scales and biases (training).
+    ///
+    /// # Errors
+    ///
+    /// Fails if `l` is out of range or an MLX operation fails.
+    pub fn layer_with(&self, l: usize, h: &Array, ex: [[&Array; 3]; 3], bits: i32, kernel: bool) -> Result<Array> {
+        let c = &self.cfg;
+        let ly = self.layers.get(l).ok_or_else(|| Error::Format(format!("no layer {l}")))?;
+        let x = fast::rms_norm(h, Some(&ly.in_norm), c.eps)?;
+        let m = match &ly.mixer {
+            Mixer::Attn(a) => attention(c, a, &mut None, &mut None, &x, 0, &Rope::Offset(0))?,
+            Mixer::Delta(d) => {
+                let step = if kernel { self.step.as_ref() } else { None };
+                d.forward(&x, &mut deltanet::State::default(), c.eps, step)?
+            }
+        };
+        let h = h.add(&m)?;
+        let x = fast::rms_norm(&h, Some(&ly.post_norm), c.eps)?;
+        let (idx, w) = route_logits(c, &keep_bias(self.keep.as_deref(), l, ly.router.apply(&x)?)?, false)?;
+        let q = |[w, scales, biases]: [&Array; 3]| QMat {
+            w: w.clone(),
+            scales: scales.clone(),
+            biases: biases.clone(),
+            group: c.group as i32,
+            bits,
+        };
+        let [gate, up, down] = ex;
+        let ex = Experts {
+            gate: q(gate),
+            up: q(up),
+            down: q(down),
+        };
+        Ok(h.add(&combine(ly, &x, &experts(&ex, &x, &idx)?, &w)?)?)
+    }
+
+    /// The logits of residuals `h` `[1, L, hidden]` (final norm and head; lazy).
+    ///
+    /// # Errors
+    ///
+    /// Fails if an MLX operation fails.
+    pub fn logits(&self, h: &Array) -> Result<Array> {
+        self.head.apply(&fast::rms_norm(h, Some(&self.norm), self.cfg.eps)?)
     }
 
     /// The cache arrays (to evaluate with the next token, so none stays lazy).
@@ -1302,7 +1394,12 @@ fn keep_bias(keep: Option<&[Array]>, l: usize, logits: Array) -> Result<Array> {
 fn route_logits(c: &Config, logits: &Array, dynamic: bool) -> Result<(Array, Array)> {
     let p = ironbark_mlx::ops::softmax_axis(logits, -1, true)?;
     let k = c.top_k as i32;
-    let idx = argpartition_axis(&p, -k, -1)?.index((.., .., c.experts as i32 - k..));
+    // The choice is not differentiable: training takes gradients through the weights only.
+    let idx = ironbark_mlx::transforms::stop_gradient(argpartition_axis(&p, -k, -1)?.index((
+        ..,
+        ..,
+        c.experts as i32 - k..,
+    )))?;
     let mut w = p.take_along_axis(&idx, -1)?;
     if c.norm_top_k {
         w = w.divide(w.sum_axis(-1, true)?)?;
