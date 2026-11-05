@@ -19,6 +19,7 @@ use std::path::Path;
 
 use ironbark_mlx::{Array, Dtype};
 
+use crate::affine::AffineRecord;
 use crate::kernel::{Kernel, Output};
 use crate::pack::{PAGE, Packed, rows_to_trits};
 use crate::{Error, Result, manifest};
@@ -131,24 +132,8 @@ pub(crate) fn pack(out: &Path, ternary: &Path, layers: usize, experts: usize, re
         }
         ironbark_mlx::memory::clear_cache()?;
     }
-    let path = out.join("config.json");
-    let raw = std::fs::read(&path).map_err(io(&path))?;
-    let mut c: serde_json::Value =
-        serde_json::from_slice(&raw).map_err(|e| Error::Format(format!("{}: {e}", path.display())))?;
-    c["quantization"]["experts"] = serde_json::json!({ "ternary": true, "group_size": GROUP });
-    let json = serde_json::to_string_pretty(&c).map_err(|e| Error::Format(e.to_string()))?;
-    std::fs::write(&path, json).map_err(io(&path))?;
-    let meta = serde_json::json!({
-        "version": manifest::VERSION,
-        "layers": layers,
-        "experts": experts,
-        "record_bytes": rec.bytes(),
-        "format": FORMAT,
-        "stride": stride,
-    });
-    let json = out.join("experts.json");
-    std::fs::write(&json, meta.to_string()).map_err(io(&json))?;
-    manifest::write(out, &hashes, rec.bytes(), stride)?;
+    let marker = serde_json::json!({ "ternary": true, "group_size": GROUP });
+    crate::experts::finish(out, layers, experts, rec.bytes(), stride, FORMAT, &marker, &hashes)?;
     Ok(Packed {
         records: layers * experts,
         record_bytes: rec.bytes(),
@@ -256,14 +241,111 @@ const UKS: usize = 4;
 const DR: usize = 4;
 const DKS: usize = 2;
 
-/// The slab of ternary records as the u32 array each layer's kernels read: its own view
-/// `[per_layer, stride / 4]` with slots numbered from 0, or the whole slab with
-/// global slots; with the kernels of its layout.
-pub(crate) struct TernSlab {
-    pub(crate) layers: Vec<Array>,
-    pub(crate) rec: TernRecord,
-    pub(crate) kernels: Kernels,
-}
+/// [`UP_GATE`] on one row `x` for the fused decode: rows 0..8 the routed experts (their slots
+/// `table[ids[s]]`, zeros where `live` is 0), row 8 the 4-bit `shared` record.
+const FAST_UP_GATE: &str = r"
+    uint lid=thread_index_in_simdgroup, sg=simdgroup_index_in_threadgroup;
+    uint s=threadgroup_position_in_grid.y;
+    uint row0=threadgroup_position_in_grid.x*UR;
+    bool routed=s<8;
+    const device uchar* rec=routed?(const device uchar*)slab+(ulong)table[ids[s]]*REC:(const device uchar*)shared;
+    const device bfloat16_t* sgate=(const device bfloat16_t*)(rec+(routed?GSOFF:SGSOFF));
+    const device bfloat16_t* sup=(const device bfloat16_t*)(rec+(routed?USOFF:SUSOFF));
+    const device bfloat16_t* bgate=(const device bfloat16_t*)(rec+SGBOFF);
+    const device bfloat16_t* bup=(const device bfloat16_t*)(rec+SUBOFF);
+    const device uint* wgate=(const device uint*)rec;
+    const device uint* wup=(const device uint*)(rec+SUOFF);
+    constexpr uint ROWB=H/16*3+H/64, ROWW=H*BITS/32, PART=H/FUKS;
+    threadgroup float part[FUKS][2*UR];
+    float up[UR]={0}, gate[UR]={0};
+    bool on=!routed||live[s]!=0.0f;
+    for (uint k=sg*PART;on&&k<(sg+1)*PART;k+=512) {
+        uint kk=k+lid*16;
+        if (kk<(sg+1)*PART) {
+            float xt[16], sum=0;
+            for (int i=0;i<16;++i) { xt[i]=float(x[kk+i]); sum+=xt[i]; }
+            uint g=kk/16, grp=kk/64;
+            if (routed) {
+                for (uint r=0;r<UR;++r) {
+                    uint row=row0+r;
+                    gate[r]+=tern_dot(rec+row*ROWB, H/16, g, xt, sum, float(sgate[row*(H/64)+grp]));
+                    up[r]+=tern_dot(rec+UOFF+row*ROWB, H/16, g, xt, sum, float(sup[row*(H/64)+grp]));
+                }
+            } else {
+                uint at=g*W16;
+                for (uint r=0;r<UR;++r) {
+                    uint row=row0+r, gi=row*(H/64)+grp;
+                    gate[r]+=float(sgate[gi])*aff_dot(wgate+row*ROWW+at, xt)+float(bgate[gi])*sum;
+                    up[r]+=float(sup[gi])*aff_dot(wup+row*ROWW+at, xt)+float(bup[gi])*sum;
+                }
+            }
+        }
+    }
+    for (uint r=0;r<UR;++r) {
+        float gs=simd_sum(gate[r]), us=simd_sum(up[r]);
+        if (lid==0) { part[sg][r]=gs; part[sg][UR+r]=us; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint t=thread_index_in_threadgroup;
+    if (t<UR) {
+        float gs=0, us=0;
+        for (uint j=0;j<FUKS;++j) { gs+=part[j][t]; us+=part[j][UR+t]; }
+        float g=float(bfloat16_t(gs)), u=float(bfloat16_t(us));
+        out[(ulong)s*F+row0+t]=bfloat16_t(g/(1.0f+metal::precise::exp(-g))*u);
+    }
+";
+
+/// [`DOWN`] for the fused decode, rows as [`FAST_UP_GATE`].
+const FAST_DOWN: &str = r"
+    uint lid=thread_index_in_simdgroup, sg=simdgroup_index_in_threadgroup;
+    uint s=threadgroup_position_in_grid.y;
+    uint row0=threadgroup_position_in_grid.x*DR;
+    bool routed=s<8;
+    const device uchar* rec=routed?(const device uchar*)slab+(ulong)table[ids[s]]*REC:(const device uchar*)shared;
+    const device bfloat16_t* sd=(const device bfloat16_t*)(rec+(routed?DSOFF:SDSOFF));
+    const device bfloat16_t* bd=(const device bfloat16_t*)(rec+SDBOFF);
+    const device uint* wd=(const device uint*)(rec+SDOFF);
+    const device bfloat16_t* xv=act+(ulong)s*F;
+    constexpr uint ROWB=F/16*3+F/64, ROWW=F*BITS/32, PART=F/FDKS;
+    threadgroup float part[FDKS][DR];
+    float y[DR]={0};
+    bool on=!routed||live[s]!=0.0f;
+    for (uint k=sg*PART;on&&k<(sg+1)*PART;k+=512) {
+        uint kk=k+lid*16;
+        if (kk<(sg+1)*PART) {
+            float xt[16], sum=0;
+            for (int i=0;i<16;++i) { xt[i]=float(xv[kk+i]); sum+=xt[i]; }
+            uint g=kk/16, grp=kk/64;
+            if (routed) {
+                for (uint r=0;r<DR;++r) {
+                    uint row=row0+r;
+                    y[r]+=tern_dot(rec+DOFF+row*ROWB, F/16, g, xt, sum, float(sd[row*(F/64)+grp]));
+                }
+            } else {
+                uint at=g*W16;
+                for (uint r=0;r<DR;++r) {
+                    uint row=row0+r, gi=row*(F/64)+grp;
+                    y[r]+=float(sd[gi])*aff_dot(wd+row*ROWW+at, xt)+float(bd[gi])*sum;
+                }
+            }
+        }
+    }
+    for (uint r=0;r<DR;++r) {
+        float v=simd_sum(y[r]);
+        if (lid==0) part[sg][r]=v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint t=thread_index_in_threadgroup;
+    if (t<DR) {
+        float v=0;
+        for (uint j=0;j<FDKS;++j) v+=part[j][t];
+        out[(ulong)s*H+row0+t]=bfloat16_t(v);
+    }
+";
+
+/// Input splits of the fused kernels.
+const FUKS: usize = 2;
+const FDKS: usize = 1;
 
 /// A slot table `[layers · experts]` of global slots as each layer's slots numbered from 0.
 pub(crate) fn layer_local(table: &Array, experts: usize, per_layer: usize) -> Result<Array> {
@@ -285,6 +367,58 @@ pub(crate) fn layer_local(table: &Array, experts: usize, per_layer: usize) -> Re
 pub(crate) struct Kernels {
     up_gate: Kernel,
     down: Kernel,
+    rec: TernRecord,
+    stride: usize,
+}
+
+/// The fused decode's two kernels: routed ternary experts and an affine shared expert in one
+/// launch each.
+pub(crate) struct FastKernels {
+    up_gate: Kernel,
+    down: Kernel,
+    rec: TernRecord,
+}
+
+impl FastKernels {
+    /// The 8 routed experts `ids` (`table[ids]` their slots in `slab`; skipped where `live` is 0)
+    /// and the `shared` record on one row `x`: `[9, hidden]`.
+    pub(crate) fn apply(
+        &self,
+        x: &Array,
+        slab: &Array,
+        shared: &Array,
+        table: &Array,
+        ids: &Array,
+        live: &Array,
+    ) -> Result<Array> {
+        let (f, h) = (self.rec.ffn as i32, self.rec.hidden as i32);
+        let act = self
+            .up_gate
+            .apply(
+                &[x, slab, shared, table, ids, live],
+                &[],
+                (f / UR as i32 * 32 * FUKS as i32, 9, 1),
+                (32 * FUKS as i32, 1, 1),
+                &[Output {
+                    shape: &[9, f],
+                    dtype: Dtype::Bfloat16,
+                }],
+            )?
+            .remove(0);
+        Ok(self
+            .down
+            .apply(
+                &[&act, slab, shared, table, ids, live],
+                &[],
+                (h / DR as i32 * 32 * FDKS as i32, 9, 1),
+                (32 * FDKS as i32, 1, 1),
+                &[Output {
+                    shape: &[9, h],
+                    dtype: Dtype::Bfloat16,
+                }],
+            )?
+            .remove(0))
+    }
 }
 
 impl Kernels {
@@ -312,25 +446,63 @@ impl Kernels {
         Kernels {
             up_gate: Kernel::new("ironbark_tern_up_gate", &["x", "slab", "slots", "tok"], &["out"], UP_GATE, &header),
             down: Kernel::new("ironbark_tern_down", &["act", "slab", "slots"], &["out"], DOWN, &header),
+            rec,
+            stride,
         }
     }
 
-    /// Experts of `layer` in its slots `slots` `[S]` (u32, from 0) on rows `tok` `[S]` (u32) of
-    /// `x` `[T, hidden]` (bf16): `[S, hidden]`.
-    pub(crate) fn apply(&self, x: &Array, s: &TernSlab, layer: usize, slots: &Array, tok: &Array) -> Result<Array> {
-        let act = self.up_gate(x, s, layer, slots, tok)?;
-        self.down(&act, s, layer, slots)
+    /// The fused decode's kernels, for a shared expert with this record layout.
+    pub(crate) fn fast(&self, shared: AffineRecord) -> FastKernels {
+        let rec = self.rec;
+        let consts = [
+            ("H", rec.hidden),
+            ("F", rec.ffn),
+            ("REC", self.stride),
+            ("UOFF", rec.up()),
+            ("DOFF", rec.down()),
+            ("GSOFF", rec.gate_scales()),
+            ("USOFF", rec.up_scales()),
+            ("DSOFF", rec.down_scales()),
+            ("UR", UR),
+            ("DR", DR),
+            ("FUKS", FUKS),
+            ("FDKS", FDKS),
+        ];
+        let defs: String = consts
+            .iter()
+            .map(|(n, v)| format!("constant constexpr uint {n} = {v};\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let header = format!("{}{defs}{}{TDOT}{}", crate::row::trit_lut(), shared.defs("S"), crate::affine::ADOT);
+        let inputs = ["slab", "shared", "table", "ids", "live"];
+        let named = |first: &'static str| {
+            let mut v = vec![first];
+            v.extend(inputs);
+            v
+        };
+        FastKernels {
+            up_gate: Kernel::new("ironbark_tern_fast_up_gate", &named("x"), &["out"], FAST_UP_GATE, &header),
+            down: Kernel::new("ironbark_tern_fast_down", &named("act"), &["out"], FAST_DOWN, &header),
+            rec,
+        }
+    }
+
+    /// Experts in slots `slots` `[S]` (u32) of `slab` on rows `tok` `[S]` (u32) of `x`
+    /// `[T, hidden]` (bf16): `[S, hidden]`.
+    pub(crate) fn apply(&self, x: &Array, slab: &Array, slots: &Array, tok: &Array) -> Result<Array> {
+        let act = self.up_gate(x, slab, slots, tok)?;
+        self.down(&act, slab, slots)
     }
 
     /// Gate and up rows with the activation: `[S, ffn]`.
-    pub(crate) fn up_gate(&self, x: &Array, s: &TernSlab, layer: usize, slots: &Array, tok: &Array) -> Result<Array> {
-        let f = s.rec.ffn as i32;
+    pub(crate) fn up_gate(&self, x: &Array, slab: &Array, slots: &Array, tok: &Array) -> Result<Array> {
+        let f = self.rec.ffn as i32;
         let n = slots.shape()[0];
         let x = x.as_dtype(Dtype::Bfloat16)?;
         Ok(self
             .up_gate
             .apply(
-                &[&x, &s.layers[layer], slots, tok],
+                &[&x, slab, slots, tok],
                 &[],
                 (f / UR as i32 * 32 * UKS as i32, n, 1),
                 (32 * UKS as i32, 1, 1),
@@ -343,13 +515,13 @@ impl Kernels {
     }
 
     /// Down rows on `act` `[S, ffn]`: `[S, hidden]`.
-    pub(crate) fn down(&self, act: &Array, s: &TernSlab, layer: usize, slots: &Array) -> Result<Array> {
-        let h = s.rec.hidden as i32;
+    pub(crate) fn down(&self, act: &Array, slab: &Array, slots: &Array) -> Result<Array> {
+        let h = self.rec.hidden as i32;
         let n = slots.shape()[0];
         Ok(self
             .down
             .apply(
-                &[act, &s.layers[layer], slots],
+                &[act, slab, slots],
                 &[],
                 (h / DR as i32 * 32 * DKS as i32, n, 1),
                 (32 * DKS as i32, 1, 1),
@@ -409,15 +581,12 @@ mod tests {
         }
         let x: Vec<f32> = (0..h).map(|_| bf16(lcg(&mut seed) - 0.5)).collect();
         let words: Vec<u32> = slab.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
-        let t = TernSlab {
-            layers: vec![Array::from_slice(&words, &[ne as i32, (stride / 4) as i32])],
-            rec,
-            kernels: Kernels::new(rec, stride),
-        };
+        let array = Array::from_slice(&words, &[ne as i32, (stride / 4) as i32]);
+        let kernels = Kernels::new(rec, stride);
         let slots = Array::from_slice(&[1u32, 0], &[2]);
         let tok = Array::from_slice(&[0u32, 0], &[2]);
         let xa = Array::from_slice(&x, &[1, h as i32]).as_dtype(Dtype::Bfloat16).unwrap();
-        let got = t.kernels.apply(&xa, &t, 0, &slots, &tok).unwrap().as_dtype(Dtype::Float32).unwrap();
+        let got = kernels.apply(&xa, &array, &slots, &tok).unwrap().as_dtype(Dtype::Float32).unwrap();
         let got = got.as_slice::<f32>();
         for (s, &e) in [1usize, 0].iter().enumerate() {
             let [gate, up, down] = &mats[e][..] else { unreachable!() };
@@ -433,6 +602,79 @@ mod tests {
                 let g = got[s * h + n];
                 assert!((g - want).abs() <= 1e-2 * want.abs().max(1e-2), "slot {s} row {n}: {g} vs {want}");
             }
+        }
+    }
+
+    #[test]
+    fn fast_kernels_match_the_separate_ones() {
+        let (h, f, ne) = (128usize, 64usize, 2usize);
+        let rec = TernRecord { hidden: h, ffn: f };
+        let stride = rec.bytes().div_ceil(PAGE) * PAGE;
+        let mut seed = 11u64;
+        let mut slab = vec![0u8; ne * stride];
+        for b in &mut slab {
+            *b = (lcg(&mut seed) * 243.0) as u8;
+        }
+        // The extra codes of each row (weight 15, 2 bits) must not be 3; scales in range.
+        for e in 0..ne {
+            let base = e * stride;
+            for (rows, cols, at) in [(f, h, 0), (f, h, rec.up()), (h, f, rec.down())] {
+                let row = TernRecord::row(cols);
+                for r in 0..rows {
+                    let extra = &mut slab[base + at + r * row + cols / 16 * 3..base + at + r * row + row];
+                    extra.fill(0b0110_0110);
+                }
+            }
+            for at in (rec.gate_scales()..rec.bytes()).step_by(2) {
+                let b = half::bf16::from_f32(0.01 + 0.05 * lcg(&mut seed)).to_bits().to_le_bytes();
+                slab[base + at..base + at + 2].copy_from_slice(&b);
+            }
+        }
+        let shared_rec = AffineRecord {
+            hidden: h,
+            ffn: f,
+            bits: 4,
+        };
+        let shared_bytes = shared_rec.bytes().next_multiple_of(4);
+        let mut bytes: Vec<u8> = (0..shared_bytes).map(|_| (lcg(&mut seed) * 255.0) as u8).collect();
+        for pair in bytes[shared_rec.scales_start()..shared_rec.bytes()].as_chunks_mut::<2>().0 {
+            *pair = half::bf16::from_f32(0.02 * lcg(&mut seed) - 0.01).to_bits().to_le_bytes();
+        }
+        let words = |b: &[u8]| -> Vec<u32> { b.as_chunks::<4>().0.iter().map(|w| u32::from_le_bytes(*w)).collect() };
+        let array = Array::from_slice(&words(&slab), &[ne as i32, (stride / 4) as i32]);
+        let shared = Array::from_slice(&words(&bytes), &[1, (shared_bytes / 4) as i32]);
+        let x: Vec<f32> = (0..h).map(|_| bf16(lcg(&mut seed) - 0.5)).collect();
+        let xa = Array::from_slice(&x, &[1, 1, h as i32]).as_dtype(Dtype::Bfloat16).unwrap();
+        let flat = xa.reshape(&[1, h as i32]).unwrap();
+
+        let kernels = Kernels::new(rec, stride);
+        let fast = kernels.fast(shared_rec);
+        let order = [1u32, 0, 1, 0, 1, 0, 1, 0];
+        let table = Array::from_slice(&[0u32, 1], &[2]);
+        let ids = Array::from_slice(&order, &[8]);
+        let live = Array::from_slice(&[1.0f32, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0], &[8]);
+        let got = fast.apply(&xa, &array, &shared, &table, &ids, &live).unwrap().as_dtype(Dtype::Float32).unwrap();
+        let got = got.as_slice::<f32>();
+
+        let slots = Array::from_slice(&order, &[8]);
+        let tok = Array::from_slice(&[0u32; 8], &[8]);
+        let want = kernels.apply(&flat, &array, &slots, &tok).unwrap().as_dtype(Dtype::Float32).unwrap();
+        let want = want.as_slice::<f32>();
+        for s in 0..8 {
+            for n in 0..h {
+                let w = if s == 3 { 0.0 } else { want[s * h + n] };
+                let g = got[s * h + n];
+                assert!((g - w).abs() <= 1e-2 * w.abs().max(1e-2), "row {s} output {n}: {g} vs {w}");
+            }
+        }
+        let affine = crate::affine::Kernels::new(shared_rec, shared_bytes);
+        let one = Array::from_slice(&[0u32], &[1]);
+        let on = Array::from_slice(&[1.0f32], &[1]);
+        let want = affine.apply(&flat, &shared, &one, &one, &on).unwrap().as_dtype(Dtype::Float32).unwrap();
+        let want = want.as_slice::<f32>();
+        for n in 0..h {
+            let g = got[8 * h + n];
+            assert!((g - want[n]).abs() <= 1e-2 * want[n].abs().max(1e-2), "shared output {n}: {g} vs {}", want[n]);
         }
     }
 

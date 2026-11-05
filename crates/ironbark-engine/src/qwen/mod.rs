@@ -14,9 +14,9 @@
 //! Attention: q and a sigmoid output gate from one projection, RMS-normed q and k, RoPE on the
 //! first quarter of each head (MRoPE reduces to this for text), GQA. Logits are not capped.
 //!
-//! Weights are resident (an MLX 4-bit checkpoint), or a pack's (`ironbark pack --ternary`):
-//! the 4-bit non-expert weights resident and ternary experts in `experts.bin`, cached in full
-//! or streamed (the router's choice read back per layer, those experts pinned and loaded, the
+//! Weights are resident (an MLX 4-bit or 8-bit checkpoint), or a pack's (`ironbark pack`): the
+//! non-expert weights resident and ternary ([`tern`]) or affine ([`affine`]) experts in
+//! `experts.bin`, cached in full or streamed (the router's choice read back per layer, those experts pinned and loaded, the
 //! next layer's predicted from this residual and prefetched). The DeltaNet recurrence is one
 //! Metal kernel launch per layer and forward ([`deltanet`]).
 
@@ -32,10 +32,11 @@ use ironbark_mlx::{Array, Dtype, fast};
 
 use ironbark_experts::{ExpertRef, Layout, Pin, Records, Store};
 
+use crate::affine::{self, AffineRecord};
 use crate::kv::kv_update;
 use crate::model::{QMat, load_tensors};
 use crate::quant::Tensors;
-use crate::tern::{self, TernRecord, TernSlab};
+use crate::tern::{self, TernRecord};
 use crate::{Error, Result};
 
 pub mod deltanet;
@@ -74,6 +75,8 @@ pub struct Config {
     pub group: usize,
     /// Experts are ternary trit records in `experts.bin` ([`pack_ternary`]).
     pub expert_ternary: bool,
+    /// Experts are affine records of these bits in `experts.bin` ([`pack_affine`]).
+    pub expert_bits: Option<usize>,
 }
 
 impl Config {
@@ -140,6 +143,7 @@ impl Config {
             eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
             group: q["group_size"].as_u64().unwrap_or(64) as usize,
             expert_ternary: q["experts"]["ternary"].as_bool().unwrap_or(false),
+            expert_bits: q["experts"]["bits"].as_u64().map(|b| b as usize),
         })
     }
 }
@@ -164,6 +168,43 @@ pub fn pack_ternary(model: &Path, out: &Path, ternary: &Path) -> Result<crate::p
     crate::experts::write_slim(model, out, load_tensors(model)?, ".mlp.switch_mlp.")?;
     vision::pack(model, out, vision::PACK_BITS)?;
     tern::pack(out, ternary, cfg.layers, cfg.experts, record(&cfg))
+}
+
+/// Write a pack to `out` keeping the experts of the MLX checkpoint `model` at its precision (4
+/// or 8 bits): its non-expert weights, config and tokenizer, and the experts as affine records
+/// in `experts.bin`, to run in full or streamed.
+///
+/// # Errors
+///
+/// Fails if `out` is `model`, a tensor is missing or does not match the config, the experts
+/// are not 4 or 8 bits, or a file cannot be written.
+pub fn pack_affine(model: &Path, out: &Path) -> Result<crate::pack::Packed> {
+    let cfg = Config::read(model)?;
+    if out.canonicalize().ok() == model.canonicalize().ok() {
+        return Err(Error::Format("pack: out must differ from the model dir".into()));
+    }
+    std::fs::create_dir_all(out).map_err(|source| Error::Io {
+        path: out.to_path_buf(),
+        source,
+    })?;
+    let t = load_tensors(model)?;
+    let prefix = |l: usize| format!("{PREFIX}.layers.{l}.mlp.switch_mlp");
+    let shape = |part: &str| {
+        let key = format!("{}.gate_proj.{part}", prefix(0));
+        t.get(&key)
+            .map(Array::shape)
+            .map(|s| s[2])
+            .ok_or_else(|| Error::Format(format!("{}: no {key}", model.display())))
+    };
+    let bits = affine::bits_of(shape("weight")?, shape("scales")?)?;
+    crate::experts::write_slim(model, out, t.clone(), ".mlp.switch_mlp.")?;
+    vision::pack(model, out, vision::PACK_BITS)?;
+    let rec = AffineRecord {
+        hidden: cfg.hidden,
+        ffn: cfg.expert_ffn,
+        bits,
+    };
+    affine::pack(out, t, prefix, cfg.layers, cfg.experts, rec)
 }
 
 /// Add the vision encoder of the checkpoint `model` to the existing pack `out` (and its
@@ -398,6 +439,76 @@ impl Snapshot {
     }
 }
 
+/// The one-token path of a pack with every expert in RAM: about a quarter of the launches.
+struct FusedDecode {
+    fused: crate::fused::Fused,
+    delta: deltanet::FusedKernels,
+    /// Ternary records: their kernels with the shared expert. Affine records use the slab's.
+    tern: Option<tern::FastKernels>,
+    /// Per layer: the shared expert as a record, and each expert's slot in the layer's slab.
+    layers: Vec<(Array, Array)>,
+    zero: Array,
+}
+
+impl FusedDecode {
+    /// The path for this model, if it fits: bf16 weights of the kernels' sizes, ternary records
+    /// or affine records with the shared expert's bits.
+    fn new(c: &Config, layers: &[Layer], stream: Option<&Streaming>) -> Result<Option<Self>> {
+        let Some(Streaming {
+            slab, all: Some(all), ..
+        }) = stream
+        else {
+            return Ok(None);
+        };
+        let Some(first) = layers.first() else { return Ok(None) };
+        let bits = first.shared.up.bits as usize;
+        if matches!(slab.kernels, RecordKernels::Affine(_)) && c.expert_bits != Some(bits) {
+            return Ok(None);
+        }
+        let hidden = crate::fused::HIDDEN as usize;
+        let same = layers
+            .iter()
+            .all(|l| l.shared.up.bits == bits as i32 && l.router.group == 64 && l.shared.up.group == 64);
+        if c.hidden != hidden
+            || c.experts != 256
+            || c.top_k != 8
+            || c.group != 64
+            || !same
+            || !deltanet::FusedKernels::fits(c.delta)
+        {
+            return Ok(None);
+        }
+        let rec = AffineRecord {
+            hidden,
+            ffn: c.expert_ffn,
+            bits,
+        };
+        let tern = match &slab.kernels {
+            RecordKernels::Tern(k) => Some(k.fast(rec)),
+            RecordKernels::Affine(_) => None,
+        };
+        let ne = c.experts as i32;
+        let mut per = Vec::with_capacity(layers.len());
+        for (i, l) in layers.iter().enumerate() {
+            let s = &l.shared;
+            let m = |q: &'_ QMat| -> [Array; 3] { [q.w.clone(), q.scales.clone(), q.biases.clone()] };
+            let (g, u, d) = (m(&s.gate), m(&s.up), m(&s.down));
+            let shared =
+                affine::record_array(rec, [&g[0], &g[1], &g[2]], [&u[0], &u[1], &u[2]], [&d[0], &d[1], &d[2]])?;
+            let table = all.index(i as i32 * ne..(i as i32 + 1) * ne).as_dtype(Dtype::Uint32)?;
+            ironbark_mlx::transforms::eval([&shared, &table])?;
+            per.push((shared, table));
+        }
+        Ok(Some(Self {
+            fused: crate::fused::Fused::new(c.eps, c.theta),
+            delta: deltanet::FusedKernels::new(c.delta, c.eps),
+            tern,
+            layers: per,
+            zero: Array::zeros::<f32>(&[1, 1, crate::fused::HIDDEN])?.as_dtype(Dtype::Bfloat16)?,
+        }))
+    }
+}
+
 /// Qwen3.5 / 3.6 MoE on the GPU.
 pub struct Model {
     pub cfg: Config,
@@ -414,6 +525,8 @@ pub struct Model {
     /// The layers captured.
     capture_layers: std::ops::Range<usize>,
     stream: Option<Streaming>,
+    /// The one-token path, when the pack fits it.
+    fast: Option<FusedDecode>,
     /// Streaming: predict and prefetch the experts of this many layers ahead (0 = off).
     pub lookahead: usize,
     /// Streaming: experts the last forward's kernels may still read, until `held_until` is
@@ -434,9 +547,35 @@ pub struct Model {
 
 /// Experts in the store: its slab as the ternary kernels read it and, when the cache holds
 /// every expert, the slot of each (no readback).
+/// How the kernels read a pack's expert records.
+enum RecordKernels {
+    Tern(tern::Kernels),
+    Affine(affine::Kernels),
+}
+
+/// The slab of expert records as the u32 array each layer's kernels read: its own view
+/// `[per_layer, stride / 4]` with slots numbered from 0, or the whole slab with global slots;
+/// with the kernels of its layout.
+struct Slab {
+    layers: Vec<Array>,
+    kernels: RecordKernels,
+}
+
+impl Slab {
+    /// Experts of `layer` in its slots `slots` `[S]` (u32) on rows `tok` `[S]` (u32) of `x`
+    /// `[T, hidden]` (bf16): `[S, hidden]`. Affine records skip the pairs where `live` `[S]`
+    /// (f32) is 0.
+    fn apply(&self, x: &Array, layer: usize, slots: &Array, tok: &Array, live: &Array) -> Result<Array> {
+        match &self.kernels {
+            RecordKernels::Tern(k) => k.apply(x, &self.layers[layer], slots, tok),
+            RecordKernels::Affine(k) => k.apply(x, &self.layers[layer], slots, tok, live),
+        }
+    }
+}
+
 struct Streaming {
     store: Arc<Store>,
-    slab: TernSlab,
+    slab: Slab,
     all: Option<Array>,
 }
 
@@ -492,19 +631,28 @@ impl Model {
         records: Arc<dyn Records>,
     ) -> Result<Self> {
         let cfg = Config::read(dir)?;
-        if !cfg.expert_ternary {
-            return Err(Error::Format(format!("{}: Qwen packs need ternary experts", dir.display())));
-        }
-        if crate::experts::format(experts)? != tern::FORMAT {
-            return Err(Error::Format(format!(
-                "{}: expert records are not {} (re-run pack)",
-                experts.display(),
-                tern::FORMAT
-            )));
-        }
         let layout = Layout::read(experts)?;
-        let rec = record(&cfg);
-        if layout.layers != cfg.layers || layout.experts != cfg.experts || layout.record_bytes != rec.bytes() as u64 {
+        let (want, record_bytes, kernels) = match cfg.expert_bits {
+            Some(bits) => {
+                let rec = AffineRecord {
+                    hidden: cfg.hidden,
+                    ffn: cfg.expert_ffn,
+                    bits,
+                };
+                let kernels = RecordKernels::Affine(affine::Kernels::new(rec, layout.stride as usize));
+                (affine::format(bits), rec.bytes(), kernels)
+            }
+            None if cfg.expert_ternary => {
+                let rec = record(&cfg);
+                let kernels = RecordKernels::Tern(tern::Kernels::new(rec, layout.stride as usize));
+                (tern::FORMAT.to_owned(), rec.bytes(), kernels)
+            }
+            None => return Err(Error::Format(format!("{}: not a Qwen pack (no expert records)", dir.display()))),
+        };
+        if crate::experts::format(experts)? != want {
+            return Err(Error::Format(format!("{}: expert records are not {want} (re-run pack)", experts.display())));
+        }
+        if layout.layers != cfg.layers || layout.experts != cfg.experts || layout.record_bytes != record_bytes as u64 {
             return Err(Error::Format(format!("{}: does not match the checkpoint (re-run pack)", experts.display())));
         }
         if per_layer < cfg.top_k {
@@ -520,11 +668,7 @@ impl Model {
             vec![crate::kernel::wrap_slab(&store)?; cfg.layers]
         };
         ironbark_mlx::transforms::eval(layers.iter())?;
-        let slab = TernSlab {
-            layers,
-            rec,
-            kernels: tern::Kernels::new(rec, layout.stride as usize),
-        };
+        let slab = Slab { layers, kernels };
         let all = if local {
             let table = crate::model::preload(&store, cfg.layers, cfg.experts)?;
             Some(tern::layer_local(&table, cfg.experts, store.per_layer())?)
@@ -590,6 +734,7 @@ impl Model {
             &head.scales,
             &head.biases,
         ])?;
+        let fast = FusedDecode::new(&cfg, &layers, stream.as_ref())?;
         Ok(Model {
             state: cfg.full.iter().map(|&f| State::fresh(f)).collect(),
             cfg,
@@ -601,6 +746,7 @@ impl Model {
             capture: None,
             capture_layers: 0..0,
             stream,
+            fast,
             lookahead: 1,
             held: Vec::new(),
             held_until: None,
@@ -843,7 +989,7 @@ impl Model {
                     let ne = c.experts as i32;
                     let table = st.all.as_ref().map(|t| t.index(i as i32 * ne..(i as i32 + 1) * ne));
                     let slots = table.ok_or_else(|| Error::Format("no slot table".into()))?.take_axis(&idx, 0)?;
-                    slab_experts(&st.slab, i, &x, &slots)?
+                    slab_experts(&st.slab, i, &x, &slots, &w)?
                 }
                 _ => return Err(Error::Format("step_batch: experts must be resident or all cached".into())),
             };
@@ -1185,6 +1331,45 @@ impl Model {
         self.forward_traced(ids, None, all, None)
     }
 
+    /// One token through [`FusedDecode`]; the residual stream is carried as (h, hn): every
+    /// add + norm pair is one kernel.
+    fn step_fused(&mut self, ids: &Array) -> Result<Array> {
+        let (Some(f), Some(st)) = (&self.fast, &self.stream) else {
+            return Err(Error::Format("no fused decode".into()));
+        };
+        let c = &self.cfg;
+        let pos = self.pos as i32;
+        let rope = Rope::Offset((self.pos as i64 + self.delta) as i32);
+        let x = self.embed_ids(ids)?.expand_dims(0)?;
+        let (mut h, mut hn) = f.fused.add_norm(&x, &f.zero, &self.layers[0].in_norm)?;
+        for i in 0..self.layers.len() {
+            let ly = &self.layers[i];
+            let r = match (&ly.mixer, &mut self.state[i]) {
+                (Mixer::Attn(a), State::Kv { k, v }) => attention(c, a, k, v, &hn, pos, &rope)?,
+                (Mixer::Delta(d), State::Delta(s)) => d.step_fused(&hn, s, &f.delta)?,
+                _ => return Err(Error::Format("layer state does not match its mixer".into())),
+            };
+            let m = &ly.router;
+            let (h2, hn2, mut ids, mut scores) =
+                f.fused.add_norm_affine_router(&h, &r, &ly.post_norm, &m.w, &m.scales, &m.biases, m.bits)?;
+            if c.dynamic.on(c.top_k) {
+                (ids, scores) = c.dynamic.apply(&ids, &scores)?;
+            }
+            let (shared, table) = &f.layers[i];
+            let slab = &st.slab.layers[i];
+            let y = match (&f.tern, &st.slab.kernels) {
+                (Some(k), _) => k.apply(&hn2, slab, shared, table, &ids, &scores)?,
+                (None, RecordKernels::Affine(k)) => k.apply_with_shared(&hn2, slab, shared, table, &ids, &scores)?,
+                (None, RecordKernels::Tern(_)) => return Err(Error::Format("ternary records without kernels".into())),
+            };
+            let gate = ly.shared.weight.apply(&hn2)?;
+            let next = self.layers.get(i + 1).map_or(&self.norm, |l| &l.in_norm);
+            (h, hn) = f.fused.agg_shared(&h2, &y, &scores, &gate, next)?;
+        }
+        self.pos += 1;
+        self.head.apply(&hn)
+    }
+
     /// [`Model::forward`], pushing each layer's mixer output, MoE output and residual to
     /// `trace` (to compare with a reference layer by layer).
     #[allow(clippy::too_many_lines, reason = "one pass over the layers")]
@@ -1198,6 +1383,16 @@ impl Model {
         mut trace: Option<&mut Vec<[Array; 3]>>,
     ) -> Result<Array> {
         let n = ids.shape()[0];
+        if n == 1
+            && mm.is_none()
+            && trace.is_none()
+            && self.fast.is_some()
+            && self.capture.is_none()
+            && self.keep.is_none()
+            && self.layers.iter().all(|l| l.experts.is_none())
+        {
+            return self.step_fused(ids);
+        }
         // Dynamic top-k on decode steps (one token) only.
         let dynamic = n == 1;
         let mut h = match mm {
@@ -1236,7 +1431,7 @@ impl Model {
                     let ne = c.experts as i32;
                     let table = st.all.as_ref().map(|t| t.index(i as i32 * ne..(i as i32 + 1) * ne));
                     let slots = table.ok_or_else(|| Error::Format("no slot table".into()))?.take_axis(&idx, 0)?;
-                    slab_experts(&st.slab, i, &x, &slots)?
+                    slab_experts(&st.slab, i, &x, &slots, &w)?
                 }
                 (None, Some(st), Some(store)) => {
                     (idx, w) = route_logits(c, &logits, dynamic)?;
@@ -1305,12 +1500,13 @@ impl Model {
                         let slots: Vec<u32> = pairs.iter().map(|&p| slot[chosen[p]]).collect();
                         let tok: Vec<u32> = pairs.iter().map(|&p| (p / k) as u32).collect();
                         let m = pairs.len() as i32;
-                        let y = st.slab.kernels.apply(
+                        let y = st.slab.apply(
                             &x2,
-                            &st.slab,
                             i,
                             &Array::from_slice(&slots, &[m]),
                             &Array::from_slice(&tok, &[m]),
+                            // Dropped pairs are not in this group.
+                            &Array::from_slice(&vec![1.0f32; pairs.len()], &[m]),
                         )?;
                         if gi + 1 < groups.len() {
                             y.eval()?;
@@ -1343,15 +1539,16 @@ impl Model {
     }
 }
 
-/// The experts of `layer` in slab slots `slots` `[1, L, k]` on `x` `[1, L, hidden]` →
-/// `[1, L, k, hidden]`.
-fn slab_experts(slab: &TernSlab, layer: usize, x: &Array, slots: &Array) -> Result<Array> {
+/// The experts of `layer` in slab slots `slots` `[1, L, k]` with routing weights `w` on `x`
+/// `[1, L, hidden]` → `[1, L, k, hidden]`.
+fn slab_experts(slab: &Slab, layer: usize, x: &Array, slots: &Array, w: &Array) -> Result<Array> {
     let s = slots.shape();
     let (l, k) = (s[1], s[2]);
     let flat = slots.flatten(None, None)?.as_dtype(Dtype::Uint32)?;
     let tok: Vec<u32> = (0..(l * k) as u32).map(|i| i / k as u32).collect();
     let tok = Array::from_slice(&tok, &[l * k]);
-    let y = slab.kernels.apply(&x.reshape(&[l, -1])?, slab, layer, &flat, &tok)?;
+    let live = w.flatten(None, None)?.as_dtype(Dtype::Float32)?;
+    let y = slab.apply(&x.reshape(&[l, -1])?, layer, &flat, &tok, &live)?;
     Ok(y.reshape(&[1, l, k, -1])?)
 }
 
@@ -1849,6 +2046,7 @@ mod tests {
             eps: 1e-6,
             group: 32,
             expert_ternary: false,
+            expert_bits: None,
         };
         let eye: Vec<f32> = (0..4 * 64).map(|i| if i / 64 == i % 64 { 1.0 } else { 0.0 }).collect();
         let w = Array::from_slice(&eye, &[4, 64]);

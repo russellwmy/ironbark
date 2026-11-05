@@ -17,6 +17,7 @@
     reason = "MLX shapes and indices are i32; model dimensions are far below i32::MAX"
 )]
 
+mod affine;
 pub mod bench;
 mod config;
 pub mod device;
@@ -44,6 +45,23 @@ pub use error::{Error, Result};
 pub use model::{KvSnapshot, Model, StepTiming};
 pub use pack::{Packed, pack};
 pub use prefill::CHUNK;
+
+/// Let one Metal command buffer hold a whole decode step: MLX's defaults (20–50 operations) end a
+/// buffer every few layers, and each one costs a submission (Qwen3.6 q4 on an M1 Max: 63 → 82
+/// tok/s). A setting already in the environment wins.
+///
+/// # Safety
+///
+/// Call it first in `main`, before any thread starts and before any MLX call: MLX reads these
+/// once, when it opens the device.
+pub unsafe fn large_command_buffers() {
+    for name in ["MLX_MAX_OPS_PER_BUFFER", "MLX_MAX_MB_PER_BUFFER"] {
+        if std::env::var_os(name).is_none() {
+            // SAFETY: no other thread is running (the caller's contract).
+            unsafe { std::env::set_var(name, "1000") };
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {

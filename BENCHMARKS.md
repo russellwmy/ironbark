@@ -24,7 +24,9 @@ Measured speed, memory and accuracy of ironbark on Apple Silicon, for Qwen3.6-35
 
 | Model | Where | Setup | Decode | Peak memory |
 |---|---|---|---|---|
-| Qwen3.6-35B-A3B | M1 Max | Ternary pack, all experts in RAM | 69–72 tok/s | 10.2 GB |
+| Qwen3.6-35B-A3B | M1 Max | Ternary pack, all experts in RAM | 114 tok/s (61 after a 26,612-token prompt) | 10.1 GB |
+| Qwen3.6-35B-A3B | M1 Max | q4 pack, all experts in RAM | 115 tok/s (~95 after a 1,289-token prompt) | 24.2 GB |
+| Qwen3.6-35B-A3B | M1 Max | q8 pack, all experts in RAM | 80 tok/s | not measured |
 | Qwen3.6-35B-A3B | M1 Max | Ternary pack, 3 GB budget | 10.4–11.7 tok/s | 3.0 GB |
 | Qwen3.6-35B-A3B | iPhone 17 | Ternary pack, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
 | Maple | M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
@@ -33,6 +35,10 @@ Measured speed, memory and accuracy of ironbark on Apple Silicon, for Qwen3.6-35
 | Maple | iPhone 17 | Trit pack, 1.5 GB budget | 13.7 tok/s | 1.3 GB |
 
 Greedy decode; the Maple checkpoint row after a short prompt, the others after a 733–962-token prompt (iPhone: prose).
+
+The ternary row (measured 2026-11-04) is the same setup, on the coding pack: 84.5 tok/s before the fused path, 52.8 after the long prompt. The fused path changes logits slightly. Rust HumanEval through it, one problem at a time: 90/156 (old path, batched: 83/156). General pack, same speed (84.1 to 113.8 tok/s): Rust 85/156 (old: 80/156), Python 129/164 (old: 130/164). Experts are about 28% of its decode time (158 tok/s with them stubbed out). The attention layers bound long contexts: a custom attention kernel and fused norms gave no gain over MLX.
+
+The q4 and q8 rows (measured 2026-11-03) are steady decode of 300 tokens after a 36-token Rust prompt, kernels already compiled (`gen --top 3`), one sequence on the fused path. Before it: q4 63, q8 54 tok/s. Rust HumanEval through it, one problem at a time: q4 140/156, q8 142/156 (old path, batched: 142, 143; differences of ~3 are rounding noise). The peak is prefill's; `large_command_buffers` raises it from 20.3 GB.
 
 ## Qwen3.6-35B-A3B
 

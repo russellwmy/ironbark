@@ -50,6 +50,12 @@ struct ExpertArgs {
     /// Streaming: predict and prefetch the experts of this many layers ahead (0 = off)
     #[arg(long, default_value_t = 1)]
     lookahead: usize,
+    /// Qwen, dynamic top-k: drop a decode token's choices whose share of the routing is under this
+    #[arg(long, default_value_t = 0.0)]
+    expert_drop: f32,
+    /// Qwen, dynamic top-k: fewest experts a token keeps
+    #[arg(long, default_value_t = 3)]
+    min_k: usize,
     /// Fill `--experts`' experts.bin and embed.bin on demand from this complete pack (a stand-in
     /// for a server; delete them in `--experts` first)
     #[arg(long)]
@@ -73,6 +79,8 @@ impl ExpertArgs {
             budget: self.budget.map(|g| (g * 1e9) as u64),
             loaders: self.loaders,
             lookahead: self.lookahead,
+            drop_below: self.expert_drop,
+            min_k: self.min_k,
             fetch: self.fetch_from.map(|from| maple::Remote {
                 from,
                 delay: std::time::Duration::from_millis(self.fetch_ms),
@@ -162,6 +170,8 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // SAFETY: first in main; nothing else is running.
+    unsafe { ironbark_engine::large_command_buffers() };
     match Cli::parse().cmd {
         Cmd::Download {
             repo,
@@ -200,6 +210,9 @@ fn main() -> Result<()> {
             let p = if let Some(t) = &ternary {
                 anyhow::ensure!(ironbark_engine::qwen::is_qwen(&model), "--ternary: Qwen3.5 / 3.6 only");
                 ironbark_engine::qwen::pack_ternary(&model, &out, t)?
+            } else if ironbark_engine::qwen::is_qwen(&model) {
+                // The experts at the checkpoint's own precision (4 or 8 bits).
+                ironbark_engine::qwen::pack_affine(&model, &out)?
             } else {
                 ironbark_engine::pack(&model, &out, !two_bit)?
             };

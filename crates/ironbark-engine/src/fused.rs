@@ -24,6 +24,7 @@ const ADD_NORM: &str = r"
     uint tid = thread_position_in_threadgroup.x;
     constexpr uint N = DIM;
     constexpr uint PT = 4u;
+    INIT_
     float hb[PT];
     float ss = 0.0f;
     for (uint i = 0; i < PT; ++i) {
@@ -104,6 +105,30 @@ const RESIDUAL_AGG: &str = r"
         }
     }
     float v = (float)x[j] + (float)(T_)agg;
+";
+
+/// [`RESIDUAL_AGG`] plus the gated shared expert, row 8 of `r` (Qwen; `gate` is its logit).
+const INIT_SHARED: &str = "float shared_w = 1.0f / (1.0f + metal::precise::exp(-(float)gate[0]));";
+const RESIDUAL_AGG_SHARED: &str = r"
+    float agg = 0.0f;
+    {
+        #pragma clang fp contract(off)
+        for (uint e = 0; e < 8; ++e) {
+            agg = agg + (float)r[e * N + j] * scores[e];
+        }
+        agg = agg + (float)r[8 * N + j] * shared_w;
+    }
+    float v = (float)x[j] + (float)(T_)agg;
+";
+
+/// One affine router weight (the row `mat` of `(float)mat[...]` in [`NORM_GEMV`]), `BITS` bits per
+/// code, low bits first, groups of 64.
+const AFFINE_WEIGHT: &str = r"
+                uint jj = base + lane * TN + n;
+                constexpr uint EL = 32 / BITS;
+                uint code = (mat[row * (K / EL) + jj / EL] >> (BITS * (jj % EL))) & ((1u << BITS) - 1u);
+                uint gi = row * (K / 64) + jj / 64;
+                float wv = float(scales[gi]) * float(code) + float(biases[gi]);
 ";
 
 const STORE_H: &str = "h_out[j] = vb;";
@@ -267,7 +292,9 @@ pub(crate) const HIDDEN: i32 = 2048;
 pub(crate) struct Fused {
     add_norm: Kernel,
     agg_norm: Kernel,
+    agg_shared: Kernel,
     norm_gemv: Kernel,
+    norm_gemv_affine: Kernel,
     /// Run add + norm inside the router GEMV ([`Fused::add_norm_router`]). On the Mac this saves
     /// a launch per layer (~4% decode); on iPhone 17 every shape tried was within noise of
     /// separate launches, so iOS keeps those.
@@ -293,6 +320,7 @@ impl Fused {
                 .replace("STORE_HN", hn)
                 .replace("STORE_H", h)
                 .replace("EPS_", &eps_lit)
+                .replace("INIT_", "")
         };
         let body = |residual: &str, guarded: bool| {
             if guarded {
@@ -321,6 +349,29 @@ impl Fused {
                 &["x", "r", "w", "mat"],
                 &["h_out", "hn_out", "logits"],
                 &format!("threadgroup T_ xs[DIM];\n{}{NORM_GEMV}", norm(RESIDUAL_ADD, STORE_H_FIRST, STORE_HN_SHARED)),
+                "",
+            ),
+            agg_shared: Kernel::new(
+                "ironbark_agg_shared_add_rms_norm",
+                &["x", "r", "scores", "gate", "w"],
+                &["h_out", "hn_out"],
+                &ADD_NORM
+                    .replace("INIT_", INIT_SHARED)
+                    .replace("RESIDUAL", RESIDUAL_AGG_SHARED)
+                    .replace("STORE_HN", STORE_HN)
+                    .replace("STORE_H", STORE_H)
+                    .replace("EPS_", &eps_lit),
+                "",
+            ),
+            norm_gemv_affine: Kernel::new(
+                "ironbark_add_rms_norm_affine_router_gemv",
+                &["x", "r", "w", "mat", "scales", "biases"],
+                &["h_out", "hn_out", "logits"],
+                &format!(
+                    "threadgroup T_ xs[DIM];\n{}{}",
+                    norm(RESIDUAL_ADD, STORE_H_FIRST, STORE_HN_SHARED),
+                    NORM_GEMV.replace("float wv = float(mat[row * K + base + lane * TN + n]);", AFFINE_WEIGHT)
+                ),
                 "",
             ),
             qk: Kernel::new("ironbark_qk_norm_rope", &["x", "qw", "kw", "pos_eps"], &["out"], QK_NORM_ROPE, ""),
@@ -370,6 +421,62 @@ impl Fused {
         )?;
         let hn = o.remove(1);
         Ok((o.remove(0), hn))
+    }
+
+    /// `h + Σ_e scores[e] · y[e] + sigmoid(gate) · y[8]` and its RMSNorm · `w`; `y` `[9, 2048]`,
+    /// `scores` `[8]` f32, `gate` one value.
+    pub(crate) fn agg_shared(
+        &self,
+        h: &Array,
+        y: &Array,
+        scores: &Array,
+        gate: &Array,
+        w: &Array,
+    ) -> Result<(Array, Array)> {
+        let dt = h.dtype();
+        let shape = [1, 1, HIDDEN];
+        let mut o = self.agg_shared.apply(
+            &[h, y, scores, gate, w],
+            &[Template::Dtype("T_", dt), Template::Int("DIM", HIDDEN)],
+            (HIDDEN / 4, 1, 1),
+            (HIDDEN / 4, 1, 1),
+            &Self::norm_outputs(&shape, dt),
+        )?;
+        let hn = o.remove(1);
+        Ok((o.remove(0), hn))
+    }
+
+    /// [`Fused::add_norm_router`] with an affine router of `bits`: (h, hn, ids, scores).
+    #[expect(clippy::too_many_arguments, reason = "the kernel's inputs")]
+    pub(crate) fn add_norm_affine_router(
+        &self,
+        h: &Array,
+        r: &Array,
+        w: &Array,
+        mat: &Array,
+        scales: &Array,
+        biases: &Array,
+        bits: i32,
+    ) -> Result<(Array, Array, Array, Array)> {
+        let dt = h.dtype();
+        let shape = [1, 1, HIDDEN];
+        let logits_shape = [256];
+        let out = |shape, dtype| Output { shape, dtype };
+        let mut o = self.norm_gemv_affine.apply(
+            &[h, r, w, mat, scales, biases],
+            &[
+                Template::Dtype("T_", dt),
+                Template::Int("DIM", HIDDEN),
+                Template::Int("BITS", bits),
+            ],
+            (256 / 16 * HIDDEN / 4, 1, 1),
+            (HIDDEN / 4, 1, 1),
+            &[out(&shape, dt), out(&shape, dt), out(&logits_shape, Dtype::Float32)],
+        )?;
+        let logits = o.remove(2);
+        let hn = o.remove(1);
+        let (ids, scores) = self.select(&logits)?;
+        Ok((o.remove(0), hn, ids, scores))
     }
 
     /// Per-head RMSNorm (`qw` for the first `nq` heads, `kw` for the rest) of `qk`
@@ -551,6 +658,67 @@ mod tests {
             assert_eq!(ids.as_slice::<u32>(), want_ids.as_slice::<u32>(), "fused {fuse}");
             assert_eq!(bits(&scores), bits(&want_scores), "fused {fuse}");
         }
+    }
+
+    /// Affine routers of `bits` against the same weights written out in fp32.
+    #[test]
+    fn affine_router_matches_dense() {
+        let f = Fused::new(EPS, 10_000.0);
+        let h = vec_bf16(HIDDEN, 22, 1e-3).reshape(&[1, 1, HIDDEN]).unwrap();
+        let r = vec_bf16(HIDDEN, 23, 2e-3).reshape(&[1, 1, HIDDEN]).unwrap();
+        let w = vec_bf16(HIDDEN, 24, 1e-3);
+        let groups = 256 * HIDDEN / 64;
+        let scales = vec_bf16(groups, 25, 1e-6).abs().unwrap().add(Array::from_f32(1e-3)).unwrap();
+        let scales = scales.as_dtype(Dtype::Bfloat16).unwrap().reshape(&[256, HIDDEN / 64]).unwrap();
+        let biases = vec_bf16(groups, 26, 1e-4).reshape(&[256, HIDDEN / 64]).unwrap();
+        let (sv, bv) = (bits(&scales), bits(&biases));
+        for code_bits in [4i32, 8] {
+            let el = 32 / code_bits as usize;
+            let code = |i: usize| (i.wrapping_mul(2_654_435_761) >> 7) as u32 & ((1u32 << code_bits) - 1);
+            let total = 256 * HIDDEN as usize;
+            let packed: Vec<u32> = (0..total / el)
+                .map(|n| (0..el).fold(0, |a, j| a | (code(n * el + j) << (code_bits as usize * j))))
+                .collect();
+            let dense: Vec<f32> = (0..total)
+                .map(|i| f32::from_bits(sv[i / 64]) * code(i) as f32 + f32::from_bits(bv[i / 64]))
+                .collect();
+            let words = Array::from_slice(&packed, &[256, (total / el / 256) as i32]);
+            let mat = Array::from_slice(&dense, &[256, HIDDEN]);
+            let (want_h, want_hn, want_ids, want_scores) = f.add_norm_router(&h, &r, &w, &mat).unwrap();
+            let (hh, hn, ids, scores) =
+                f.add_norm_affine_router(&h, &r, &w, &words, &scales, &biases, code_bits).unwrap();
+            assert_eq!(bits(&hh), bits(&want_h));
+            assert_eq!(bits(&hn), bits(&want_hn));
+            assert_eq!(ids.as_slice::<u32>(), want_ids.as_slice::<u32>(), "{code_bits} bits");
+            assert_eq!(bits(&scores), bits(&want_scores), "{code_bits} bits");
+        }
+    }
+
+    #[test]
+    fn agg_shared_adds_the_gated_shared_row() {
+        let f = Fused::new(EPS, 10_000.0);
+        let h = vec_bf16(HIDDEN, 16, 1e-3).reshape(&[1, 1, HIDDEN]).unwrap();
+        let y = vec_bf16(9 * HIDDEN, 17, 3e-3).reshape(&[9, HIDDEN]).unwrap();
+        let s: Vec<f32> = vec![0.3, 0.2, 0.15, 0.1, 0.1, 0.08, 0.04, 0.03];
+        let scores = Array::from_slice(&s, &[8]);
+        let gate = Array::from_slice(&[0.5f32], &[1]).as_dtype(Dtype::Bfloat16).unwrap();
+        let w = vec_bf16(HIDDEN, 18, 1e-3);
+        let (hh, hn) = f.agg_shared(&h, &y, &scores, &gate, &w).unwrap();
+        let yv = y.as_dtype(Dtype::Float32).unwrap();
+        let yv = yv.as_slice::<f32>();
+        let hv = h.as_dtype(Dtype::Float32).unwrap();
+        let hv = hv.as_slice::<f32>();
+        let g = 1.0 / (1.0 + (-0.5f32).exp());
+        let want: Vec<f32> = (0..HIDDEN as usize)
+            .map(|j| {
+                let n = HIDDEN as usize;
+                let moe: f32 = (0..8).map(|e| yv[e * n + j] * s[e]).sum();
+                hv[j] + half::bf16::from_f32(moe + yv[8 * n + j] * g).to_f32()
+            })
+            .collect();
+        let want = Array::from_slice(&want, &[1, 1, HIDDEN]).as_dtype(Dtype::Bfloat16).unwrap();
+        assert_eq!(bits(&hh), bits(&want));
+        assert_eq!(bits(&hn), bits(&rms(&want, &w)));
     }
 
     #[test]

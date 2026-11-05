@@ -242,6 +242,176 @@ impl DeltaNet {
     }
 }
 
+/// One token before the recurrence: the conv over `[prev ‖ qkv]`, SiLU, the q and k L2 norms,
+/// and the value heads' β and g. A SIMD group per head of `c` (`Hk` q, `Hk` k, `Hv` v heads).
+const PREP: &str = r"
+    uint head=thread_position_in_grid.y, lane=thread_position_in_grid.x;
+    float c_[PL], ss=0;
+    for (uint i=0;i<PL;++i) {
+        uint j=head*D+lane*PL+i;
+        float v=float(wc[j*4])*float(prev[j])+float(wc[j*4+1])*float(prev[CD+j])
+            +float(wc[j*4+2])*float(prev[2*CD+j])+float(wc[j*4+3])*float(qkv[j]);
+        v=float(bfloat16_t(v));
+        v=float(bfloat16_t(v/(1.0f+metal::precise::exp(-v))));
+        c_[i]=v;
+        ss+=v*v;
+        tail[j]=prev[CD+j];
+        tail[CD+j]=prev[2*CD+j];
+        tail[2*CD+j]=qkv[j];
+    }
+    if (head<2*Hk) {
+        ss=simd_sum(ss);
+        float s=metal::precise::rsqrt(ss/D+L2_EPS)*(head<Hk?INV2:INV);
+        for (uint i=0;i<PL;++i) c[head*D+lane*PL+i]=bfloat16_t(c_[i]*s);
+    } else {
+        for (uint i=0;i<PL;++i) c[head*D+lane*PL+i]=bfloat16_t(c_[i]);
+        if (lane==0) {
+            uint hv=head-2*Hk;
+            float b_=float(b[hv]);
+            gb[Hv+hv]=float(bfloat16_t(1.0f/(1.0f+metal::precise::exp(-b_))));
+            float t=float(bfloat16_t(float(a[hv])+float(dt_bias[hv])));
+            float sp=float(bfloat16_t(metal::precise::log(1.0f+metal::precise::exp(t))));
+            gb[hv]=metal::precise::exp(-metal::precise::exp(a_log[hv])*sp);
+        }
+    }
+";
+
+/// [`STEP`] for one token, its inputs from [`PREP`].
+const FAST_STEP: &str = r"
+    uint hv=thread_position_in_grid.z, dv=thread_position_in_grid.y, dk=thread_position_in_threadgroup.x;
+    uint hk=hv/(Hv/Hk);
+    const device bfloat16_t* q=c+hk*D+dk*PL;
+    const device bfloat16_t* k=c+(Hk+hk)*D+dk*PL;
+    uint st=(hv*D+dv)*D+dk*PL;
+    float state[PL], g=gb[hv], kv=0;
+    for (uint i=0;i<PL;++i) { state[i]=state_in[st+i]*g; kv+=state[i]*float(k[i]); }
+    kv=simd_sum(kv);
+    float delta=(float(c[(2*Hk+hv)*D+dv])-kv)*gb[Hv+hv], o=0;
+    for (uint i=0;i<PL;++i) {
+        state[i]+=float(k[i])*delta;
+        o+=state[i]*float(q[i]);
+        state_out[st+i]=state[i];
+    }
+    o=simd_sum(o);
+    if (thread_index_in_simdgroup==0) y[hv*D+dv]=bfloat16_t(o);
+";
+
+/// After the recurrence: per value head, `silu(z) · RMSNorm(y) · w`.
+const POST: &str = r"
+    uint head=thread_position_in_grid.y, lane=thread_position_in_grid.x;
+    uint at=head*D+lane*PL;
+    float ss=0;
+    for (uint i=0;i<PL;++i) { float v=float(y[at+i]); ss+=v*v; }
+    ss=simd_sum(ss);
+    float s=metal::precise::rsqrt(ss/D+EPS);
+    for (uint i=0;i<PL;++i) {
+        float yn=float(bfloat16_t(float(w[i+lane*PL])*(float(y[at+i])*s)));
+        float z_=float(z[at+i]);
+        out[at+i]=bfloat16_t(z_/(1.0f+metal::precise::exp(-z_))*yn);
+    }
+";
+
+/// The kernels of [`DeltaNet::step_fused`], sizes compiled in.
+pub(crate) struct FusedKernels {
+    prep: Kernel,
+    step: Kernel,
+    post: Kernel,
+    shape: Shape,
+}
+
+impl FusedKernels {
+    /// Key and value heads must be the same size, a multiple of 32.
+    pub(crate) fn new(s: Shape, eps: f32) -> Self {
+        let inv = (s.k_dim as f32).powf(-0.5);
+        let header = format!(
+            "constant constexpr uint Hk={};constant constexpr uint Hv={};constant constexpr uint D={};             constant constexpr uint PL={};constant constexpr uint CD={};             constant constexpr float INV={inv:.10e}f;constant constexpr float INV2={:.10e}f;             constant constexpr float L2_EPS={:.10e}f;constant constexpr float EPS={eps:.10e}f;
+",
+            s.k_heads,
+            s.v_heads,
+            s.k_dim,
+            s.k_dim / 32,
+            s.conv_dim(),
+            inv * inv,
+            1e-6 * inv * inv,
+        );
+        Self {
+            prep: Kernel::new(
+                "ironbark_delta_prep",
+                &["prev", "qkv", "wc", "a", "b", "dt_bias", "a_log"],
+                &["c", "gb", "tail"],
+                PREP,
+                &header,
+            ),
+            step: Kernel::new(
+                "ironbark_delta_fast_step",
+                &["c", "gb", "state_in"],
+                &["y", "state_out"],
+                FAST_STEP,
+                &header,
+            ),
+            post: Kernel::new("ironbark_delta_post", &["y", "z", "w"], &["out"], POST, &header),
+            shape: s,
+        }
+    }
+
+    /// Whether the kernels work for this shape.
+    pub(crate) fn fits(s: Shape) -> bool {
+        s.k_dim == s.v_dim && s.k_dim.is_multiple_of(32) && s.conv == 4 && s.v_dim.is_multiple_of(4)
+    }
+}
+
+impl DeltaNet {
+    /// [`DeltaNet::forward`] of one token `x` `[1, 1, hidden]` (bf16) in four launches plus the
+    /// projections.
+    pub(crate) fn step_fused(&self, x: &Array, st: &mut State, f: &FusedKernels) -> Result<Array> {
+        let s = f.shape;
+        let (hv, d, cd) = (s.v_heads as i32, s.k_dim as i32, s.conv_dim() as i32);
+        let qkv = self.qkv.apply(x)?;
+        let z = self.z.apply(x)?;
+        let b = self.b.apply(x)?;
+        let a = self.a.apply(x)?;
+        let prev = match &st.conv {
+            Some(c) => c.clone(),
+            None => Array::zeros::<f32>(&[1, 3, cd])?.as_dtype(Dtype::Bfloat16)?,
+        };
+        let state = match &st.ssm {
+            Some(s) => s.clone(),
+            None => Array::zeros::<f32>(&[1, hv, d, d])?,
+        };
+        let (c_shape, gb_shape, tail_shape) = ([cd], [2 * hv], [1, 3, cd]);
+        let (y_shape, state_shape, out_shape) = ([hv * d], [1, hv, d, d], [1, 1, hv * d]);
+        let out = |shape, dtype| Output { shape, dtype };
+        let mut o = f.prep.apply(
+            &[&prev, &qkv, &self.conv, &a, &b, &self.dt_bias, &self.a_log],
+            &[],
+            (32, 2 * s.k_heads as i32 + hv, 1),
+            (32, 1, 1),
+            &[
+                out(&c_shape, Dtype::Bfloat16),
+                out(&gb_shape, Dtype::Float32),
+                out(&tail_shape, Dtype::Bfloat16),
+            ],
+        )?;
+        st.conv = Some(o.remove(2));
+        let gb = o.remove(1);
+        let c = o.remove(0);
+        let mut o = f.step.apply(
+            &[&c, &gb, &state],
+            &[],
+            (32, d, hv),
+            (32, 4, 1),
+            &[out(&y_shape, Dtype::Bfloat16), out(&state_shape, Dtype::Float32)],
+        )?;
+        st.ssm = Some(o.remove(1));
+        let y = o.remove(0);
+        let gated = f
+            .post
+            .apply(&[&y, &z, &self.norm], &[], (32, hv, 1), (32, 1, 1), &[out(&out_shape, Dtype::Bfloat16)])?
+            .remove(0);
+        self.out.apply(&gated)
+    }
+}
+
 /// mlx-lm's `gated_delta_step` kernel (no mask, one gate per head and token).
 const STEP: &str = r"
     auto n = thread_position_in_grid.z;
@@ -498,11 +668,15 @@ mod tests {
 
     /// A layer with random dense weights: 2 key heads serving 4 value heads of `dim`, hidden 16.
     fn toy(dim: usize) -> DeltaNet {
+        toy_shape(dim, 8)
+    }
+
+    fn toy_shape(dim: usize, v_dim: usize) -> DeltaNet {
         let shape = Shape {
             k_heads: 2,
             v_heads: 4,
             k_dim: dim,
-            v_dim: 8,
+            v_dim,
             conv: 4,
         };
         let hidden = 16i32;
@@ -519,7 +693,7 @@ mod tests {
             conv: Array::from_slice(&noise(cd * 4, 16), &[cd as i32, 4, 1]),
             dt_bias: Array::from_slice(&noise(4, 17), &[4]),
             a_log: Array::from_slice(&noise(4, 18), &[4]),
-            norm: Array::from_slice(&[1.0f32; 8], &[8]),
+            norm: Array::from_slice(&vec![1.0f32; v_dim], &[v_dim as i32]),
             shape,
         }
     }
@@ -542,6 +716,42 @@ mod tests {
                 let ds = both.ssm.as_ref().unwrap().index(r..=r).subtract(one.ssm.unwrap()).unwrap();
                 assert!(ds.abs().unwrap().max(None).unwrap().item_exact::<f32>() < 1e-4);
             }
+        }
+    }
+
+    /// The fused launches against the MLX ops, token by token, up to bf16 rounding.
+    #[test]
+    fn fused_step_matches_forward() {
+        let d = toy_shape(32, 32);
+        let bf = |l: &Linear| match l {
+            Linear::Dense(w) => Linear::Dense(w.as_dtype(Dtype::Bfloat16).unwrap()),
+            Linear::Quant(_) => unreachable!("toy weights are dense"),
+        };
+        let d = DeltaNet {
+            qkv: bf(&d.qkv),
+            z: bf(&d.z),
+            b: bf(&d.b),
+            a: bf(&d.a),
+            out: bf(&d.out),
+            conv: d.conv.as_dtype(Dtype::Bfloat16).unwrap(),
+            dt_bias: d.dt_bias.as_dtype(Dtype::Bfloat16).unwrap(),
+            norm: d.norm.as_dtype(Dtype::Bfloat16).unwrap(),
+            ..d
+        };
+        let fused = FusedKernels::new(d.shape, 1e-6);
+        let kernel = step_kernel();
+        let (mut a, mut b) = (State::default(), State::default());
+        for t in 0..6 {
+            let x = Array::from_slice(&noise(16, 40 + t), &[1, 1, 16]).as_dtype(Dtype::Bfloat16).unwrap();
+            let want = d.forward(&x, &mut a, 1e-6, Some(&kernel)).unwrap().as_dtype(Dtype::Float32).unwrap();
+            let got = d.step_fused(&x, &mut b, &fused).unwrap().as_dtype(Dtype::Float32).unwrap();
+            let top = want.abs().unwrap().max(None).unwrap().item_exact::<f32>();
+            let diff = want.subtract(&got).unwrap().abs().unwrap().max(None).unwrap().item_exact::<f32>();
+            assert!(diff <= 0.05 * top, "token {t}: {diff} of {top}");
+            let (sa, sb) = (a.ssm.as_ref().unwrap(), b.ssm.as_ref().unwrap());
+            let top = sa.abs().unwrap().max(None).unwrap().item_exact::<f32>();
+            let diff = sa.subtract(sb).unwrap().abs().unwrap().max(None).unwrap().item_exact::<f32>();
+            assert!(diff <= 0.05 * top, "token {t} state: {diff} of {top}");
         }
     }
 

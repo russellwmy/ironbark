@@ -27,6 +27,10 @@ pub(crate) struct Experts {
     pub(crate) loaders: usize,
     /// Layers ahead to predict and prefetch.
     pub(crate) lookahead: usize,
+    /// Qwen, dynamic top-k: share of the routing a decode token's choice must reach (0: off).
+    pub(crate) drop_below: f32,
+    /// Qwen, dynamic top-k: fewest experts a token keeps.
+    pub(crate) min_k: usize,
     /// Fill `dir`'s experts.bin and embed.bin on demand from a remote copy.
     pub(crate) fetch: Option<Remote>,
 }

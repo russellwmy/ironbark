@@ -34,6 +34,39 @@ fn io(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
     }
 }
 
+/// Mark `out/config.json` with `marker` as how its experts are stored, and write `experts.json`
+/// and `manifest.json` for the records just written to `experts.bin`.
+#[expect(clippy::too_many_arguments, reason = "a pack's layout, each with its own meaning")]
+pub(crate) fn finish(
+    out: &Path,
+    layers: usize,
+    experts: usize,
+    record_bytes: usize,
+    stride: usize,
+    format: &str,
+    marker: &serde_json::Value,
+    hashes: &[u64],
+) -> Result<()> {
+    let path = out.join("config.json");
+    let raw = std::fs::read(&path).map_err(io(&path))?;
+    let mut c: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| Error::Format(format!("{}: {e}", path.display())))?;
+    c["quantization"]["experts"] = marker.clone();
+    let json = serde_json::to_string_pretty(&c).map_err(|e| Error::Format(e.to_string()))?;
+    std::fs::write(&path, json).map_err(io(&path))?;
+    let meta = serde_json::json!({
+        "version": crate::manifest::VERSION,
+        "layers": layers,
+        "experts": experts,
+        "record_bytes": record_bytes,
+        "format": format,
+        "stride": stride,
+    });
+    let json = out.join("experts.json");
+    std::fs::write(&json, meta.to_string()).map_err(io(&json))?;
+    crate::manifest::write(out, hashes, record_bytes, stride)
+}
+
 /// Every text tensor except the experts to `out/model.safetensors` with its index, and the
 /// config and tokenizer files.
 pub(crate) fn write_slim(

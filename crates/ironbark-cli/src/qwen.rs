@@ -41,6 +41,8 @@ fn load(dir: &Path, ex: &Experts) -> Result<Model> {
         None => Model::load(dir)?,
     };
     m.lookahead = ex.lookahead;
+    m.cfg.dynamic.drop_below = ex.drop_below;
+    m.cfg.dynamic.min_k = ex.min_k;
     Ok(m)
 }
 
