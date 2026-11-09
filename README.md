@@ -587,7 +587,7 @@ Qwen3.6 (measured):
 
 | Device | Budget | Experts per layer | Mode |
 |---|---|---|---|
-| iPhone 17 (8 GB) | 3.02 GB | 31 | streamed |
+| iPhone 17 (8 GB) | 3.02 GB | 40 (31 before `embed.bin`) | streamed |
 | Mac, `--budget 3` | 3 GB | 18 | streamed |
 | 32+ GB Mac | default | 256 | all loaded once (7.55 GB expert cache, 10.2 GB peak) |
 

@@ -28,7 +28,7 @@ Measured speed, memory and accuracy of ironbark on Apple Silicon, for Qwen3.6-35
 | Qwen3.6-35B-A3B | M1 Max | q4 pack, all experts in RAM | 115 tok/s (~95 after a 1,289-token prompt) | 24.2 GB |
 | Qwen3.6-35B-A3B | M1 Max | q8 pack, all experts in RAM | 80 tok/s | not measured |
 | Qwen3.6-35B-A3B | M1 Max | Ternary pack, 3 GB budget | 10.4–11.7 tok/s | 3.0 GB |
-| Qwen3.6-35B-A3B | iPhone 17 | Ternary pack, device budget (3 GB) | 7.4–7.6 tok/s | 2.9 GB |
+| Qwen3.6-35B-A3B | iPhone 17 | Ternary pack, device budget (3 GB) | 9.2–9.7 tok/s | 2.9 GB |
 | Maple | M1 Max | Checkpoint, all experts in RAM | 232 tok/s | 5.55 GB (DeepGrove's `maple.py`: 6.81 GB) |
 | Maple | M1 Max | Trit pack, experts streamed from SSD, 1.25 GB budget | 26.6 tok/s | 1.15 GB |
 | Maple | iPhone 17 | Trit pack, device budget (3 GB) | 30–31 tok/s | 2.8 GB |
@@ -67,7 +67,23 @@ Greedy text and top logits are the same. The app's planner counts only `.safeten
 
 ### Qwen on the iPhone
 
-iPhone 17, device budget (3.02 GB), 31 experts per layer, measured 2026-10-27:
+General ternary pack before and after `embed.bin`, the same app build (0.4.0 engine) for both. iPhone 17, device budget (3.02 GB), prose / Rust prompts (733 / 962 tokens), 128 decoded, 3 runs each with the packs alternating, measured 2026-11-10:
+
+| | Old pack | With `embed.bin` |
+|---|---|---|
+| Experts per layer | 31 | **40** |
+| Decode, prose / Rust | 8.33–8.42 / 5.66–5.78 tok/s | **9.16–9.67 / 6.11–7.22 tok/s** |
+| Hit, prose / Rust | 80 / 70% | 83 / 74% |
+| Loads per token, prose / Rust | 59.9 / 94.1 | 49.3 / 80.6 |
+| Load wait per token, prose / Rust | 40 / 55–58 ms | 33–38 / 49–50 ms |
+| Peak | 2.88–2.91 GB | 2.86–2.87 GB |
+| Prefill | 54–59 tok/s | 58–59 tok/s |
+
+- The planner counts only `.safetensors` as resident, so the memory-mapped embedding's 0.29 GB goes to 9 more experts per layer: 14–18% fewer loads, decode about 12% faster on prose and 11% on Rust (medians).
+- The text is the same for both packs and every run.
+- Against 2026-10-27 below (older engine, old pack: 7.4–7.6 / 5.6–6.0 tok/s), the engine alone gives prose about 11% and Rust nothing; with the new pack prose is about 27% faster.
+
+Old pack, older engine, 31 experts per layer, measured 2026-10-27:
 
 | Case | Prefill | Decode |
 |---|---|---|
