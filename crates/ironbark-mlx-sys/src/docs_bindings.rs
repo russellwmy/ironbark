@@ -313,6 +313,9 @@ pub const __MAC_26_2: u32 = 260200;
 pub const __MAC_26_3: u32 = 260300;
 pub const __MAC_26_4: u32 = 260400;
 pub const __MAC_26_5: u32 = 260500;
+pub const __MAC_26_6: u32 = 260600;
+pub const __MAC_27_0: u32 = 270000;
+pub const __MAC_27_2: u32 = 270200;
 pub const __IPHONE_2_0: u32 = 20000;
 pub const __IPHONE_2_1: u32 = 20100;
 pub const __IPHONE_2_2: u32 = 20200;
@@ -407,6 +410,10 @@ pub const __IPHONE_26_2: u32 = 260200;
 pub const __IPHONE_26_3: u32 = 260300;
 pub const __IPHONE_26_4: u32 = 260400;
 pub const __IPHONE_26_5: u32 = 260500;
+pub const __IPHONE_26_6: u32 = 260600;
+pub const __IPHONE_27_0: u32 = 270000;
+pub const __IPHONE_27_1: u32 = 270100;
+pub const __IPHONE_27_2: u32 = 270200;
 pub const __WATCHOS_1_0: u32 = 10000;
 pub const __WATCHOS_2_0: u32 = 20000;
 pub const __WATCHOS_2_1: u32 = 20100;
@@ -470,6 +477,9 @@ pub const __WATCHOS_26_2: u32 = 260200;
 pub const __WATCHOS_26_3: u32 = 260300;
 pub const __WATCHOS_26_4: u32 = 260400;
 pub const __WATCHOS_26_5: u32 = 260500;
+pub const __WATCHOS_26_6: u32 = 260600;
+pub const __WATCHOS_27_0: u32 = 270000;
+pub const __WATCHOS_27_2: u32 = 270200;
 pub const __TVOS_9_0: u32 = 90000;
 pub const __TVOS_9_1: u32 = 90100;
 pub const __TVOS_9_2: u32 = 90200;
@@ -533,6 +543,9 @@ pub const __TVOS_26_2: u32 = 260200;
 pub const __TVOS_26_3: u32 = 260300;
 pub const __TVOS_26_4: u32 = 260400;
 pub const __TVOS_26_5: u32 = 260500;
+pub const __TVOS_26_6: u32 = 260600;
+pub const __TVOS_27_0: u32 = 270000;
+pub const __TVOS_27_2: u32 = 270200;
 pub const __BRIDGEOS_2_0: u32 = 20000;
 pub const __BRIDGEOS_3_0: u32 = 30000;
 pub const __BRIDGEOS_3_1: u32 = 30100;
@@ -572,7 +585,8 @@ pub const __BRIDGEOS_10_1: u32 = 100100;
 pub const __BRIDGEOS_10_2: u32 = 100200;
 pub const __BRIDGEOS_10_3: u32 = 100300;
 pub const __BRIDGEOS_10_4: u32 = 100400;
-pub const __BRIDGEOS_26_5: u32 = 260500;
+pub const __BRIDGEOS_10_5: u32 = 100500;
+pub const __BRIDGEOS_10_6: u32 = 100600;
 pub const __DRIVERKIT_19_0: u32 = 190000;
 pub const __DRIVERKIT_20_0: u32 = 200000;
 pub const __DRIVERKIT_21_0: u32 = 210000;
@@ -600,6 +614,9 @@ pub const __DRIVERKIT_25_2: u32 = 250200;
 pub const __DRIVERKIT_25_3: u32 = 250300;
 pub const __DRIVERKIT_25_4: u32 = 250400;
 pub const __DRIVERKIT_25_5: u32 = 250500;
+pub const __DRIVERKIT_25_6: u32 = 250600;
+pub const __DRIVERKIT_27_0: u32 = 270000;
+pub const __DRIVERKIT_27_2: u32 = 270200;
 pub const __VISIONOS_1_0: u32 = 10000;
 pub const __VISIONOS_1_1: u32 = 10100;
 pub const __VISIONOS_1_2: u32 = 10200;
@@ -618,6 +635,9 @@ pub const __VISIONOS_26_2: u32 = 260200;
 pub const __VISIONOS_26_3: u32 = 260300;
 pub const __VISIONOS_26_4: u32 = 260400;
 pub const __VISIONOS_26_5: u32 = 260500;
+pub const __VISIONOS_26_6: u32 = 260600;
+pub const __VISIONOS_27_0: u32 = 270000;
+pub const __VISIONOS_27_2: u32 = 270200;
 pub const MAC_OS_X_VERSION_10_0: u32 = 1000;
 pub const MAC_OS_X_VERSION_10_1: u32 = 1010;
 pub const MAC_OS_X_VERSION_10_2: u32 = 1020;
@@ -696,10 +716,13 @@ pub const MAC_OS_VERSION_26_2: u32 = 260200;
 pub const MAC_OS_VERSION_26_3: u32 = 260300;
 pub const MAC_OS_VERSION_26_4: u32 = 260400;
 pub const MAC_OS_VERSION_26_5: u32 = 260500;
+pub const MAC_OS_VERSION_26_6: u32 = 260600;
+pub const MAC_OS_VERSION_27_0: u32 = 270000;
+pub const MAC_OS_VERSION_27_2: u32 = 270200;
 pub const __AVAILABILITY_VERSIONS_VERSION_HASH: u32 = 93585900;
 pub const __AVAILABILITY_VERSIONS_VERSION_STRING: &[u8; 6] = b"Local\0";
 pub const __AVAILABILITY_FILE: &[u8; 23] = b"AvailabilityVersions.h\0";
-pub const __MAC_OS_X_VERSION_MAX_ALLOWED: u32 = 260500;
+pub const __MAC_OS_X_VERSION_MAX_ALLOWED: u32 = 270200;
 pub const __ENABLE_LEGACY_MAC_AVAILABILITY: u32 = 1;
 pub const __DARWIN_WCHAR_MIN: i32 = -2147483648;
 pub const _FORTIFY_SOURCE: u32 = 2;
@@ -860,12 +883,13 @@ pub const IOPOL_TYPE_VFS_ATIME_UPDATES: u32 = 2;
 pub const IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES: u32 = 3;
 pub const IOPOL_TYPE_VFS_STATFS_NO_DATA_VOLUME: u32 = 4;
 pub const IOPOL_TYPE_VFS_TRIGGER_RESOLVE: u32 = 5;
-pub const IOPOL_TYPE_VFS_IGNORE_CONTENT_PROTECTION: u32 = 6;
+pub const IOPOL_TYPE_VFS_CONTENT_PROTECTION: u32 = 6;
 pub const IOPOL_TYPE_VFS_IGNORE_PERMISSIONS: u32 = 7;
 pub const IOPOL_TYPE_VFS_SKIP_MTIME_UPDATE: u32 = 8;
 pub const IOPOL_TYPE_VFS_ALLOW_LOW_SPACE_WRITES: u32 = 9;
 pub const IOPOL_TYPE_VFS_DISALLOW_RW_FOR_O_EVTONLY: u32 = 10;
 pub const IOPOL_TYPE_VFS_ENTITLED_RESERVE_ACCESS: u32 = 14;
+pub const IOPOL_TYPE_VFS_IGNORE_CONTENT_PROTECTION: u32 = 6;
 pub const IOPOL_SCOPE_PROCESS: u32 = 0;
 pub const IOPOL_SCOPE_THREAD: u32 = 1;
 pub const IOPOL_SCOPE_DARWIN_BG: u32 = 2;
@@ -890,6 +914,7 @@ pub const IOPOL_VFS_TRIGGER_RESOLVE_DEFAULT: u32 = 0;
 pub const IOPOL_VFS_TRIGGER_RESOLVE_OFF: u32 = 1;
 pub const IOPOL_VFS_CONTENT_PROTECTION_DEFAULT: u32 = 0;
 pub const IOPOL_VFS_CONTENT_PROTECTION_IGNORE: u32 = 1;
+pub const IOPOL_VFS_CONTENT_PROTECTION_STRICT: u32 = 2;
 pub const IOPOL_VFS_IGNORE_PERMISSIONS_OFF: u32 = 0;
 pub const IOPOL_VFS_IGNORE_PERMISSIONS_ON: u32 = 1;
 pub const IOPOL_VFS_SKIP_MTIME_UPDATE_OFF: u32 = 0;
@@ -3530,7 +3555,10 @@ pub struct rusage_info_v6 {
     pub ri_neural_footprint: u64,
     pub ri_lifetime_max_neural_footprint: u64,
     pub ri_interval_max_neural_footprint: u64,
-    pub ri_reserved: [u64; 9usize],
+    pub ri_conclave_footprint: u64,
+    pub ri_page_wait_time_mach: u64,
+    pub ri_page_cache_hits: u64,
+    pub ri_reserved: [u64; 6usize],
 }
 #[test]
 fn bindgen_test_layout_rusage_info_v6() {
@@ -3779,8 +3807,23 @@ fn bindgen_test_layout_rusage_info_v6() {
         "Offset of field: rusage_info_v6::ri_interval_max_neural_footprint"
     );
     assert_eq!(
-        unsafe { ::std::ptr::addr_of!((*ptr).ri_reserved) as usize - ptr as usize },
+        unsafe { ::std::ptr::addr_of!((*ptr).ri_conclave_footprint) as usize - ptr as usize },
         392usize,
+        "Offset of field: rusage_info_v6::ri_conclave_footprint"
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ri_page_wait_time_mach) as usize - ptr as usize },
+        400usize,
+        "Offset of field: rusage_info_v6::ri_page_wait_time_mach"
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ri_page_cache_hits) as usize - ptr as usize },
+        408usize,
+        "Offset of field: rusage_info_v6::ri_page_cache_hits"
+    );
+    assert_eq!(
+        unsafe { ::std::ptr::addr_of!((*ptr).ri_reserved) as usize - ptr as usize },
+        416usize,
         "Offset of field: rusage_info_v6::ri_reserved"
     );
 }
