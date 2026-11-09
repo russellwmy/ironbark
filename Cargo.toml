@@ -9,6 +9,7 @@ members = [
     "crates/ironbark-ffi",
     "crates/ironbark-mlx",
     "crates/ironbark-mlx-sys",
+    "crates/ironbark-serve",
 ]
 
 [workspace.package]
@@ -61,7 +62,7 @@ ironbark-engine = { version = "0.3.0", path = "crates/ironbark-engine" }
 ironbark-mlx = { version = "0.3.0", path = "crates/ironbark-mlx" }
 ironbark-mlx-sys = { version = "0.3.0", path = "crates/ironbark-mlx-sys" }
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 libc = "0.2"

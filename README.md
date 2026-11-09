@@ -40,6 +40,7 @@ More: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARK
 - [Usage](#usage)
   - [Chat](#chat) · [Options](#options) · [Images](#images) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server)
 - [Tool use](#tool-use)
+- [OpenAI-compatible server](#openai-compatible-server)
 - [On-demand experts](#on-demand-experts)
   - [On-demand embedding](#on-demand-embedding)
 - [iOS](#ios)
@@ -413,6 +414,44 @@ Notes:
 - The iOS chat offers three tools it runs itself, with no API keys: `calculator` (on device), `get_weather` (Open-Meteo) and `wikipedia_search` (Wikipedia API). It answers up to 3 rounds of calls per message, shows each call and result, folds the reasoning away, and renders the answer's Markdown (headings, lists, quotes, code, tables). C API: `ironbark_set_system`, `ironbark_send`, `ironbark_parse`.
 - Maple's model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17: Qwen3.6 4 of 4 at 7–9 tok/s, 2026-10-27; Maple 4 of 4 at 21–23 tok/s, 2026-10-15).
 
+## OpenAI-compatible server
+
+`ironbark-serve` serves a packed model over HTTP, for agents and other OpenAI clients.
+
+```sh
+ironbark-serve --model ~/.ironbark/models/qwen3.6-q4-pack --slots 256
+# http://127.0.0.1:8000/v1
+```
+
+```text
+ client ─HTTP─▶ connection thread ─job─▶ model thread (one reply at a time; others queue)
+        ◀─SSE── (one per request)  ◀─events─┘
+
+ each request: same system turn, tools and history as the conversation held?
+   yes ─▶ read only the new messages        no ─▶ reset and read them all
+```
+
+Agents send the whole conversation every turn, so reading only what is new is what makes long sessions usable: in a Goose session on an M1 Max, the turns after the first read 25 and 18 tokens of an 1,800-token conversation. Anything else (an edited history, a new system turn or tool list, a reply cut by `max_tokens` or a stop string, a client that left) starts over from the whole history.
+
+| | |
+|---|---|
+| Endpoints | `POST /v1/chat/completions`, `GET /v1/models`, `GET /health` |
+| Supported | Streaming, tools, `max_tokens`, `stop`, `temperature`, `top_p`, `top_k`, `presence_penalty`, `stream_options.include_usage`, `tool_choice` `auto` / `none`, `chat_template_kwargs.enable_thinking`. Reasoning comes back as `reasoning_content` |
+| Refused with a 400 | Images, `n` above 1, forced tool choice, `response_format` |
+| Ignored | `seed`, and `model` (one model per server) |
+| Security | Binds to loopback. Any other address needs `--api-key`, because anyone who reaches the port can run the model |
+
+Flags: `--host`, `--port`, `--api-key`, `--model-id`, `--budget`, `--slots` (256 keeps every expert in RAM), `--max-context` (the model's own limit: 262,144 for Qwen3.6), `--max-tokens` (16,384), `--no-think`, `--temperature`, `--top-p`, `--top-k`, `--presence-penalty`.
+
+With Goose:
+
+```sh
+OPENAI_HOST=http://127.0.0.1:8000 OPENAI_API_KEY=local \
+  goose run --no-session --provider openai --model qwen3.6-q4-pack --with-builtin developer -t "..."
+```
+
+Goose's `developer` tools run on the machine Goose runs on, also with `--container` (seen with Goose 1.51), so run Goose itself in a sandbox if the model should not touch this one.
+
 ## On-demand experts
 
 A model can ship without `experts.bin` (Maple: 4 GB) and build it locally from a server. The fetcher (`ironbark-fetch`) is separate from the engine: it fills the file on its own (e.g. at first launch, before any model is loaded), and the engine only sees a `Records` source, so a record the router needs before it arrives is fetched at once.
@@ -622,6 +661,7 @@ ironbark/
 │   ├── ironbark-experts/   event-driven expert store (SSD streaming), for the RAM work
 │   ├── ironbark-fetch/     builds a local experts.bin from a remote copy (separate from the engine)
 │   ├── ironbark-ffi/       C API (ironbark.h) for iOS / macOS apps
+│   ├── ironbark-serve/     binary `ironbark-serve`: OpenAI-compatible HTTP server
 │   ├── ironbark-cli/       binary `ironbark`: download, pack, verify, gen, profile
 │   ├── ironbark-mlx/       safe Rust API over MLX
 │   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
@@ -644,6 +684,7 @@ ironbark/
 | `ironbark-experts` | `experts.bin` records streamed from SSD into a page-aligned slab; per-layer LRU cache, loader pool, pinning; reads through a `Records` trait |
 | `ironbark-fetch` | Sparse `experts.bin` filled from a remote copy: on-demand records, hash checks, presence bitmap, background fill; runs with or without the engine |
 | `ironbark-ffi` | C API (`ironbark.h`), static library for the iOS / macOS apps |
+| `ironbark-serve` | OpenAI-compatible HTTP server over `Session`: `ironbark-serve` |
 | `ironbark-cli` | The `ironbark` binary: `download`, `pack`, `verify`, `gen`, `profile` (see [Commands](#commands)) |
 | `ironbark-mlx` | Safe Rust API over MLX for inference (arrays, ops, fused kernels, eval, compile) |
 | `ironbark-mlx-sys` | Bindings to mlx-c; builds MLX v0.32.4 and its Metal kernels for macOS and iOS |
