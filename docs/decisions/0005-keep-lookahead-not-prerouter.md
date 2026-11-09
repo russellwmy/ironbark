@@ -6,7 +6,7 @@
 | Date | 2026-11-09 |
 | Deciders | project owner |
 | Consulted | – |
-| Related | [DR-0001](0001-ternary-moe-streaming.md); [edge0](https://github.com/Edge0-AI/edge0) and its report ([arXiv 2609.18063](https://arxiv.org/abs/2609.18063)); commits `c2bc945` (route stats, `--lookahead-k`), `b7dc13a` (Qwen `embed.bin`) |
+| Related | [DR-0001](0001-ternary-moe-streaming.md); [edge0](https://github.com/Edge0-AI/edge0) and its report ([arXiv 2609.18063](https://arxiv.org/abs/2609.18063)); commits "qwen: route stats and wider lookahead prefetch" (`--route-stats`, `--lookahead-k`), `7c3edc2` (Qwen `embed.bin`, in 0.4.0) |
 
 ## Table of Contents
 
@@ -119,7 +119,7 @@ K=4, LoRA) change the model, which D1 rules out. A trained prefetch head (B) is 
 pipeline until C shows how much the phone gains from more hits per byte.
 
 For RAM, the free saving was taken instead: Qwen packs now memory-map the embedding from
-`embed.bin` (`b7dc13a`), 0.29 GB less footprint with the same output and speed (peak 3.42 →
+`embed.bin` (`7c3edc2`), 0.29 GB less footprint with the same output and speed (peak 3.42 →
 3.13 GB at 31 experts per layer on the Mac; at a 3.02 GB budget the plan fits ~9 more experts
 per layer). Both release packs were repacked with it.
 

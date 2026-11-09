@@ -50,12 +50,19 @@ struct ExpertArgs {
     /// Streaming: predict and prefetch the experts of this many layers ahead (0 = off)
     #[arg(long, default_value_t = 1)]
     lookahead: usize,
+    /// Qwen, streaming: experts prefetched per layer ahead, by router score (0: as routed)
+    #[arg(long, default_value_t = 0)]
+    lookahead_k: usize,
     /// Qwen, dynamic top-k: drop a decode token's choices whose share of the routing is under this
     #[arg(long, default_value_t = 0.0)]
     expert_drop: f32,
     /// Qwen, dynamic top-k: fewest experts a token keeps
     #[arg(long, default_value_t = 3)]
     min_k: usize,
+    /// Qwen, streaming: after decode, how well the lookahead and the previous token guess each
+    /// layer's experts
+    #[arg(long)]
+    route_stats: bool,
     /// Fill `--experts`' experts.bin and embed.bin on demand from this complete pack (a stand-in
     /// for a server; delete them in `--experts` first)
     #[arg(long)]
@@ -79,8 +86,10 @@ impl ExpertArgs {
             budget: self.budget.map(|g| (g * 1e9) as u64),
             loaders: self.loaders,
             lookahead: self.lookahead,
+            lookahead_k: self.lookahead_k,
             drop_below: self.expert_drop,
             min_k: self.min_k,
+            route_stats: self.route_stats,
             fetch: self.fetch_from.map(|from| maple::Remote {
                 from,
                 delay: std::time::Duration::from_millis(self.fetch_ms),

@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 use ironbark_mlx::fast::ScaledDotProductAttentionMask;
 use ironbark_mlx::ops::indexing::IndexOp;
-use ironbark_mlx::ops::{argpartition_axis, argsort, concatenate, dequantize, floor_divide, gather_qmm, sigmoid, silu};
+use ironbark_mlx::ops::{
+    argpartition_axis, argsort, argsort_axis, concatenate, dequantize, floor_divide, gather_qmm, sigmoid, silu,
+};
 use ironbark_mlx::{Array, Dtype, fast};
 
 use ironbark_experts::{ExpertRef, Layout, Pin, Records, Store};
@@ -559,12 +561,18 @@ pub struct Model {
     fast: Option<FusedDecode>,
     /// Streaming: predict and prefetch the experts of this many layers ahead (0 = off).
     pub lookahead: usize,
+    /// Streaming: experts prefetched per layer ahead, by the router's score; 0 = as routed
+    /// (top-k, after dynamic top-k's drop).
+    pub lookahead_k: usize,
     /// Streaming: experts the last forward's kernels may still read, until `held_until` is
     /// evaluated.
     held: Vec<Pin>,
     held_until: Option<Array>,
     /// Time spent waiting for the per-layer routing readback while streaming.
     pub sync_ns: u64,
+    /// Streaming decode: the experts each layer ran and the lookahead's guess for it
+    /// ([`Model::log_routes`]); `None`: not logged.
+    pub route_log: Option<RouteLog>,
     /// Per layer, added to the router logits: 0 for the experts kept, −∞ for the rest
     /// ([`Model::keep_experts`]; trials of a pruned model). `None`: every expert.
     keep: Option<Vec<Array>>,
@@ -782,9 +790,11 @@ impl Model {
             stream,
             fast,
             lookahead: 1,
+            lookahead_k: 0,
             held: Vec::new(),
             held_until: None,
             sync_ns: 0,
+            route_log: None,
             keep: None,
             pos: 0,
             delta: 0,
@@ -900,6 +910,15 @@ impl Model {
         self.state.clone_from(&s.state);
         self.pos = s.pos;
         self.delta = s.delta;
+    }
+
+    /// Log the routing of streamed decode steps from now on into [`Model::route_log`].
+    pub fn log_routes(&mut self) {
+        let l = self.layers.len();
+        self.route_log = Some(RouteLog {
+            chosen: vec![Vec::new(); l],
+            guess: vec![Vec::new(); l],
+        });
     }
 
     /// The expert store, when experts are in one.
@@ -1474,15 +1493,32 @@ impl Model {
                     let mut preds = Vec::new();
                     for (j, nl) in self.layers.iter().enumerate().skip(i + 1).take(self.lookahead) {
                         let xn = fast::rms_norm(&h, Some(&nl.post_norm), c.eps)?;
-                        // As this step routes: dropped choices repeat the strongest (no prefetch).
-                        preds.push((j, route_logits(c, &nl.router.apply(&xn)?, dynamic)?.0.contiguous()?));
+                        let logits = nl.router.apply(&xn)?;
+                        let p = if self.lookahead_k > 0 {
+                            let k = self.lookahead_k.min(c.experts) as i32;
+                            argpartition_axis(&logits, -k, -1)?.index((.., .., c.experts as i32 - k..))
+                        } else {
+                            // As this step routes: dropped choices repeat the strongest (no prefetch).
+                            route_logits(c, &logits, dynamic)?.0
+                        };
+                        preds.push((j, p.as_dtype(Dtype::Uint32)?.contiguous()?));
                     }
                     let idx = idx.contiguous()?;
                     // Dynamic top-k: the weights too, so dropped choices (weight 0) skip the kernels.
                     let wf = crate::dynamic::read_weights(&c.dynamic, c.top_k, dynamic, &w)?;
+                    // Route log: the next layer's experts ranked by its router on this residual.
+                    let guess = match (&self.route_log, self.layers.get(i + 1)) {
+                        (Some(_), Some(nl)) if n == 1 => {
+                            let xn = fast::rms_norm(&h, Some(&nl.post_norm), c.eps)?;
+                            let order = argsort_axis(nl.router.apply(&xn)?.negative()?, -1)?;
+                            Some(order.index((.., .., ..RANKED as i32)).as_dtype(Dtype::Uint32)?.contiguous()?)
+                        }
+                        _ => None,
+                    };
                     let mut wanted = vec![&idx];
                     wanted.extend(&wf);
                     wanted.extend(preds.iter().map(|(_, p)| p));
+                    wanted.extend(&guess);
                     let t = std::time::Instant::now();
                     ironbark_mlx::transforms::eval(wanted)?;
                     let dropped = crate::dynamic::dropped(wf.as_ref());
@@ -1492,6 +1528,13 @@ impl Model {
                     self.held.clear();
                     self.held_until = None;
                     let chosen: Vec<usize> = idx.as_slice::<u32>().iter().map(|&e| e as usize).collect();
+                    if let Some(log) = self.route_log.as_mut().filter(|_| n == 1) {
+                        let ran = (0..chosen.len()).filter(|&p| !dropped.get(p).copied().unwrap_or(false));
+                        log.chosen[i].push(ran.map(|p| chosen[p] as u16).collect());
+                        if let Some(g) = &guess {
+                            log.guess[i + 1].push(g.as_slice::<u32>().iter().map(|&e| e as u16).collect());
+                        }
+                    }
                     // Distinct experts by their last use, so when a long prompt needs several
                     // groups the last one (which stays cached) holds the newest tokens' experts.
                     let mut last = vec![usize::MAX; c.experts];
@@ -1622,6 +1665,19 @@ fn keep_bias(keep: Option<&[Array]>, l: usize, logits: Array) -> Result<Array> {
 
 /// [`route`] from the router's logits (`−∞` for experts that may not be chosen); with `dynamic`
 /// (a decode step) the weak choices dropped by the config's [`Config::dynamic`].
+/// Experts kept per guess in a [`RouteLog`], best first.
+pub const RANKED: usize = 32;
+
+/// Routing of streamed decode steps, one entry per layer and token.
+#[derive(Debug, Clone, Default)]
+pub struct RouteLog {
+    /// `[layer][token]`: the experts the layer ran (dynamic top-k's dropped choices left out).
+    pub chosen: Vec<Vec<Vec<u16>>>,
+    /// `[layer][token]`: the layer's top [`RANKED`] experts by its router on the previous
+    /// layer's residual (what lookahead 1 prefetches the top-k of); empty for layer 0.
+    pub guess: Vec<Vec<Vec<u16>>>,
+}
+
 fn route_logits(c: &Config, logits: &Array, dynamic: bool) -> Result<(Array, Array)> {
     let p = ironbark_mlx::ops::softmax_axis(logits, -1, true)?;
     let k = c.top_k as i32;

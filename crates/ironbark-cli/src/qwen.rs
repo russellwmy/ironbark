@@ -41,8 +41,12 @@ fn load(dir: &Path, ex: &Experts) -> Result<Model> {
         None => Model::load(dir)?,
     };
     m.lookahead = ex.lookahead;
+    m.lookahead_k = ex.lookahead_k;
     m.cfg.dynamic.drop_below = ex.drop_below;
     m.cfg.dynamic.min_k = ex.min_k;
+    if ex.route_stats {
+        m.log_routes();
+    }
     Ok(m)
 }
 
@@ -60,6 +64,15 @@ fn report(m: &Model, n: usize) {
             get(&st.prefetch_issued),
             m.sync_ns as f64 / 1e6 / n.max(1) as f64
         );
+        if m.route_log.is_some() {
+            println!(
+                "experts/tok: prefetch used {:.1}  dropped {:.1}  read {:.1} MB  load wait {:.1} ms/tok",
+                get(&st.prefetch_used),
+                get(&st.prefetch_dropped),
+                get(&st.bytes_read) / 1e6,
+                get(&st.wait_ns) / 1e6
+            );
+        }
     }
 }
 
@@ -93,6 +106,25 @@ pub(crate) fn run(dir: &Path, ex: &Experts, prompt: &str, n_gen: usize, top: usi
         logits = m.step(next)?;
     }
     m.sync_ns = 0;
+    if m.route_log.is_some()
+        && let Some(s) = m.store()
+    {
+        // Count decode only: the cache filled by prefill is not a decode cost.
+        let st = &s.stats;
+        for a in [
+            &st.hits,
+            &st.demand_loads,
+            &st.late_prefetch,
+            &st.prefetch_issued,
+            &st.prefetch_used,
+            &st.prefetch_dropped,
+            &st.slot_waits,
+            &st.bytes_read,
+            &st.wait_ns,
+        ] {
+            a.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     let t = Instant::now();
     let mut y = argmax_axis(&logits, -1, None)?.reshape(&[1])?.as_dtype(ironbark_mlx::Dtype::Uint32)?;
     ironbark_mlx::transforms::async_eval([&y])?;
@@ -119,7 +151,89 @@ pub(crate) fn run(dir: &Path, ex: &Experts, prompt: &str, n_gen: usize, top: usi
         decoded as f64 / decode_s
     );
     report(&m, decoded);
+    if let Some(log) = &m.route_log {
+        route_report(log);
+    }
     memory()
+}
+
+/// Share of `want` found in `have`.
+fn recall(want: &[u16], have: &[u16]) -> (usize, usize) {
+    (want.iter().filter(|e| have.contains(e)).count(), want.len())
+}
+
+/// How well each layer's experts were guessed before its routing was known: by the lookahead
+/// (its router on the previous layer's residual, top `n`), by the previous token's experts in
+/// the same layer, and by both (the union, with its size: reads if all were prefetched).
+fn route_report(log: &ironbark_engine::qwen::RouteLog) {
+    const TOPS: [usize; 4] = [8, 12, 16, 32];
+    // Per layer: hits for each top, previous token, union of top 8 and previous; union sizes.
+    let layers = log.chosen.len();
+    let mut rows = Vec::with_capacity(layers);
+    let mut total = [0usize; 7];
+    let mut union_size = (0usize, 0usize);
+    for l in 0..layers {
+        let (chosen, guess) = (&log.chosen[l], &log.guess[l]);
+        let mut r = [0usize; 7];
+        for t in 0..chosen.len() {
+            let want = &chosen[t];
+            if let Some(g) = guess.get(t) {
+                for (j, &n) in TOPS.iter().enumerate() {
+                    r[j] += recall(want, &g[..n.min(g.len())]).0;
+                }
+                r[4] += want.len();
+            }
+            if t > 0 {
+                let prev = &chosen[t - 1];
+                r[5] += recall(want, prev).0;
+                if let Some(g) = guess.get(t) {
+                    let mut u: Vec<u16> = g[..8.min(g.len())].to_vec();
+                    u.extend(prev.iter().filter(|e| !g[..8.min(g.len())].contains(e)));
+                    r[6] += recall(want, &u).0;
+                    union_size.0 += u.len();
+                    union_size.1 += 1;
+                }
+            }
+        }
+        // Previous-token recall is over tokens after the first; scale by the same denominator.
+        let prev_den: usize = chosen.iter().skip(1).map(Vec::len).sum();
+        rows.push((l, r, prev_den));
+        for j in 0..7 {
+            total[j] += r[j];
+        }
+    }
+    let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
+    let tokens = log.chosen.first().map_or(0, Vec::len);
+    println!("routing guesses over {tokens} decode tokens (recall of the experts each layer ran):");
+    println!("layer  look@8  look@12  look@16  look@32  prev-token  look@8+prev");
+    let prev_total: usize = rows.iter().map(|r| r.2).sum();
+    let guessed_prev: usize = rows.iter().filter(|r| r.1[4] > 0).map(|r| r.2).sum();
+    let guessed_total: usize = rows.iter().filter(|r| r.1[4] > 0).map(|r| r.1[6]).sum();
+    for (l, r, pd) in &rows {
+        let look = |j: usize| {
+            if r[4] > 0 {
+                format!("{:6.1}%", pct(r[j], r[4]))
+            } else {
+                "     -".into()
+            }
+        };
+        let both = if r[4] > 0 {
+            format!("{:6.1}%", pct(r[6], *pd))
+        } else {
+            "     -".into()
+        };
+        println!("{l:>5}  {}  {}  {}  {}  {:9.1}%  {}", look(0), look(1), look(2), look(3), pct(r[5], *pd), both);
+    }
+    println!(
+        "all    {:5.1}%  {:6.1}%  {:6.1}%  {:6.1}%  {:9.1}%  {:6.1}%  (union holds {:.1} experts)",
+        pct(total[0], total[4]),
+        pct(total[1], total[4]),
+        pct(total[2], total[4]),
+        pct(total[3], total[4]),
+        pct(total[5], prev_total),
+        pct(guessed_total, guessed_prev),
+        union_size.0 as f64 / union_size.1.max(1) as f64
+    );
 }
 
 /// Greedy decode of up to `n_gen` tokens answering `prompt` about the image at `path` (resized
