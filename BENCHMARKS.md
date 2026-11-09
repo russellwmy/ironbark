@@ -55,6 +55,16 @@ M1 Max, `ironbark gen`, 128 decoded, 3 runs per row, measured 2026-10-27:
 
 At 3 GB each token spends ~51 ms on the per-layer routing readback and makes 182 (prose) / 256 (Rust) expert loads. The CLI plans 18 experts per layer at 3 GB; the app plans 31 at its 3.02 GB device budget. The first prefill after a build is slower (155 tok/s, kernels compiling).
 
+Qwen's embedding in `embed.bin` (memory-mapped; earlier Qwen packs kept it in `model.safetensors`), general ternary pack, prose prompt, 128 decoded, one run each, measured 2026-11-09 with other builds running (speeds are relative):
+
+| Setting | Before: experts per layer / decode / peak | With `embed.bin` |
+|---|---|---|
+| All experts in RAM (Rust prompt, 61 decoded) | 256 / 99.8 tok/s / 13.95 GB | 256 / 99.8 tok/s / **13.65 GB** |
+| 31 per layer (the app's plan at 3.02 GB) | 31 / 19.9 tok/s / 3.42 GB | 31 / 19.5 tok/s / **3.13 GB** |
+| `--budget 3.02` (CLI plan) | 18 / 17.6 tok/s / 2.94 GB | **28** / **19.2 tok/s** / 3.03 GB |
+
+Greedy text and top logits are the same. The app's planner counts only `.safetensors` as resident weights, so at the same budget it gives the 0.29 GB to ~9 more experts per layer.
+
 ### Qwen on the iPhone
 
 iPhone 17, device budget (3.02 GB), 31 experts per layer, measured 2026-10-27:

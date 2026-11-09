@@ -495,7 +495,7 @@ impl Model {
         };
         let model = Model {
             // Mapped from `embed.bin` in a packed model (rows are paged in as tokens use them).
-            embed: match crate::embed::map(dir, &cfg)? {
+            embed: match crate::embed::map(dir, crate::embed::Shape::maple(&cfg))? {
                 Some(e) => e,
                 None => t.affine("model.word_embeddings", cfg.head_group, cfg.head_bits)?,
             },
@@ -565,7 +565,10 @@ impl Model {
         if c.complete() {
             return Ok(());
         }
-        let mut want: Vec<usize> = ids.iter().flat_map(|&t| crate::embed::chunks_of(&self.cfg, t as usize)).collect();
+        let mut want: Vec<usize> = ids
+            .iter()
+            .flat_map(|&t| crate::embed::chunks_of(crate::embed::Shape::maple(&self.cfg), t as usize))
+            .collect();
         want.sort_unstable();
         want.dedup();
         want.retain(|&i| !c.has(i));

@@ -1,7 +1,7 @@
 //! The token embedding in its own file, `embed.bin`, memory-mapped instead of loaded.
 //!
-//! A decode step reads one embedding row (~1 KiB) of 151,936; the rest of the 175 MB table
-//! sits idle. Mapped from the file and wrapped as MLX arrays without a copy, rows are paged in
+//! A decode step reads one embedding row (~1 KiB) of the table (Maple: 151,936 rows, 175 MB;
+//! Qwen3.6: 248,320 rows, 286 MB); the rest sits idle. Mapped from the file and wrapped as MLX arrays without a copy, rows are paged in
 //! when first read and, being clean file-backed memory, can be dropped again by the system:
 //! they do not count as the app's own memory.
 //!
@@ -25,6 +25,29 @@ use crate::model::QMat;
 use crate::pack::PAGE;
 use crate::{Config, Error, Result};
 
+/// An embedding table's size and affine quantization: what fixes the layout of `embed.bin`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Shape {
+    /// Rows (vocab).
+    pub(crate) vocab: usize,
+    /// Width (hidden size).
+    pub(crate) hidden: usize,
+    pub(crate) bits: usize,
+    pub(crate) group: usize,
+}
+
+impl Shape {
+    /// Maple's embedding: quantized like its LM head.
+    pub(crate) fn maple(cfg: &Config) -> Self {
+        Shape {
+            vocab: cfg.vocab,
+            hidden: cfg.hidden,
+            bits: cfg.head_bits,
+            group: cfg.head_group,
+        }
+    }
+}
+
 /// File name in a packed model.
 pub(crate) const FILE: &str = "embed.bin";
 
@@ -35,7 +58,7 @@ pub(crate) fn chunk(bytes: usize) -> usize {
     [64 << 10, 32 << 10, PAGE].into_iter().find(|c| bytes.is_multiple_of(*c)).unwrap_or(PAGE)
 }
 
-/// Byte layout of `embed.bin` for `cfg`.
+/// Byte layout of `embed.bin` for a [`Shape`].
 #[derive(Debug, Clone, Copy)]
 struct Layout {
     /// Rows stored (vocab, padded).
@@ -47,13 +70,13 @@ struct Layout {
 }
 
 impl Layout {
-    fn new(cfg: &Config) -> Self {
-        let code_row = cfg.hidden * cfg.head_bits / 8;
-        let scale_row = cfg.hidden / cfg.head_group * 2;
+    fn new(s: Shape) -> Self {
+        let code_row = s.hidden * s.bits / 8;
+        let scale_row = s.hidden / s.group * 2;
         // Rows per whole page of the smaller region (row sizes are powers of two here).
         let step = [code_row, scale_row].iter().map(|&b| PAGE / gcd(PAGE, b)).max().unwrap_or(1);
         Layout {
-            rows: cfg.vocab.div_ceil(step) * step,
+            rows: s.vocab.div_ceil(step) * step,
             code_row,
             scale_row,
         }
@@ -94,9 +117,15 @@ fn bytes(a: &Array) -> Result<Vec<u8>> {
     })
 }
 
-/// Write the embedding `e` (MLX affine layout) to `dir/embed.bin`.
-pub(crate) fn write(dir: &Path, cfg: &Config, e: &QMat) -> Result<()> {
-    let l = Layout::new(cfg);
+/// Write the embedding `e` (MLX affine layout, of shape `s`) to `dir/embed.bin`.
+pub(crate) fn write(dir: &Path, s: Shape, e: &QMat) -> Result<()> {
+    if (e.bits as usize, e.group as usize) != (s.bits, s.group) {
+        return Err(Error::Format(format!(
+            "embedding: {}-bit groups of {}, expected {}-bit groups of {}",
+            e.bits, e.group, s.bits, s.group
+        )));
+    }
+    let l = Layout::new(s);
     let path = dir.join(FILE);
     let file = File::create(&path).map_err(io(&path))?;
     file.set_len(l.bytes() as u64).map_err(io(&path))?;
@@ -106,8 +135,8 @@ pub(crate) fn write(dir: &Path, cfg: &Config, e: &QMat) -> Result<()> {
         (&e.biases, l.biases_at(), l.scale_row),
     ] {
         let b = bytes(a)?;
-        if b.len() != cfg.vocab * row {
-            return Err(Error::Format(format!("embedding: {} bytes, expected {}", b.len(), cfg.vocab * row)));
+        if b.len() != s.vocab * row {
+            return Err(Error::Format(format!("embedding: {} bytes, expected {}", b.len(), s.vocab * row)));
         }
         file.write_all_at(&b, at as u64).map_err(io(&path))?;
     }
@@ -115,8 +144,8 @@ pub(crate) fn write(dir: &Path, cfg: &Config, e: &QMat) -> Result<()> {
 }
 
 /// The chunks of `embed.bin` that hold row `row`: its codes, scales and biases.
-pub(crate) fn chunks_of(cfg: &Config, row: usize) -> [usize; 3] {
-    let l = Layout::new(cfg);
+pub(crate) fn chunks_of(s: Shape, row: usize) -> [usize; 3] {
+    let l = Layout::new(s);
     let c = chunk(l.bytes());
     [
         row * l.code_row / c,
@@ -126,24 +155,24 @@ pub(crate) fn chunks_of(cfg: &Config, row: usize) -> [usize; 3] {
 }
 
 /// The embedding of the packed model in `dir`, mapped from `embed.bin`; `None` without one.
-pub(crate) fn map(dir: &Path, cfg: &Config) -> Result<Option<QMat>> {
+pub(crate) fn map(dir: &Path, s: Shape) -> Result<Option<QMat>> {
     let path = dir.join(FILE);
     if !path.exists() {
         return Ok(None);
     }
-    let l = Layout::new(cfg);
+    let l = Layout::new(s);
     let m = Mapped::open(&path)?;
     if m.len() != l.bytes() {
         return Err(Error::Format(format!("{}: {} bytes, expected {}", path.display(), m.len(), l.bytes())));
     }
-    let (rows, h) = (l.rows as i32, cfg.hidden as i32);
-    let groups = (cfg.hidden / cfg.head_group) as i32;
+    let (rows, h) = (l.rows as i32, s.hidden as i32);
+    let groups = (s.hidden / s.group) as i32;
     Ok(Some(QMat {
-        w: m.array(0, &[rows, h * cfg.head_bits as i32 / 32], Dtype::Uint32)?,
+        w: m.array(0, &[rows, h * s.bits as i32 / 32], Dtype::Uint32)?,
         scales: m.array(l.scales_at(), &[rows, groups], Dtype::Bfloat16)?,
         biases: m.array(l.biases_at(), &[rows, groups], Dtype::Bfloat16)?,
-        group: cfg.head_group as i32,
-        bits: cfg.head_bits as i32,
+        group: s.group as i32,
+        bits: s.bits as i32,
     }))
 }
 
@@ -189,9 +218,9 @@ mod tests {
         };
         let dir = std::env::temp_dir().join(format!("ironbark-embed-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        write(&dir, &cfg, &e).unwrap();
+        write(&dir, Shape::maple(&cfg), &e).unwrap();
         // Fails if MLX had to copy the mapping.
-        let m = map(&dir, &cfg).unwrap().unwrap();
+        let m = map(&dir, Shape::maple(&cfg)).unwrap().unwrap();
         let ids = Array::from_slice(&[0u32, 999, 17, 512], &[4]);
         let rows = |q: &QMat| {
             let r = dequantize(

@@ -73,6 +73,8 @@ pub struct Config {
     pub eps: f32,
     /// Quantization group size.
     pub group: usize,
+    /// Bits of the token embedding (the checkpoint's default unless it overrides them).
+    pub embed_bits: usize,
     /// Experts are ternary trit records in `experts.bin` ([`pack_ternary`]).
     pub expert_ternary: bool,
     /// Experts are affine records of these bits in `experts.bin` ([`pack_affine`]).
@@ -142,6 +144,7 @@ impl Config {
             vocab: u("vocab_size")?,
             eps: c["rms_norm_eps"].as_f64().unwrap_or(1e-6) as f32,
             group: q["group_size"].as_u64().unwrap_or(64) as usize,
+            embed_bits: embed_bits(q),
             expert_ternary: q["experts"]["ternary"].as_bool().unwrap_or(false),
             expert_bits: q["experts"]["bits"].as_u64().map(|b| b as usize),
         })
@@ -165,7 +168,9 @@ pub fn pack_ternary(model: &Path, out: &Path, ternary: &Path) -> Result<crate::p
         path: out.to_path_buf(),
         source,
     })?;
-    crate::experts::write_slim(model, out, load_tensors(model)?, ".mlp.switch_mlp.")?;
+    let mut t = load_tensors(model)?;
+    write_embed(out, &cfg, &mut t)?;
+    crate::experts::write_slim(model, out, t, ".mlp.switch_mlp.")?;
     vision::pack(model, out, vision::PACK_BITS)?;
     tern::pack(out, ternary, cfg.layers, cfg.experts, record(&cfg))
 }
@@ -187,7 +192,8 @@ pub fn pack_affine(model: &Path, out: &Path) -> Result<crate::pack::Packed> {
         path: out.to_path_buf(),
         source,
     })?;
-    let t = load_tensors(model)?;
+    let mut t = load_tensors(model)?;
+    write_embed(out, &cfg, &mut t)?;
     let prefix = |l: usize| format!("{PREFIX}.layers.{l}.mlp.switch_mlp");
     let shape = |part: &str| {
         let key = format!("{}.gate_proj.{part}", prefix(0));
@@ -222,6 +228,30 @@ pub fn pack_vision(model: &Path, out: &Path) -> Result<Option<u64>> {
         crate::manifest::add(out, vision::FILE)?;
     }
     Ok(bytes)
+}
+
+/// Bits of the token embedding in the `quantization` block `q`: its own entry, else the default.
+fn embed_bits(q: &serde_json::Value) -> usize {
+    q[format!("{PREFIX}.embed_tokens")]["bits"].as_u64().or(q["bits"].as_u64()).unwrap_or(4) as usize
+}
+
+/// The embedding's size and quantization, as `embed.bin` stores it.
+fn embed_shape(c: &Config) -> crate::embed::Shape {
+    crate::embed::Shape {
+        vocab: c.vocab,
+        hidden: c.hidden,
+        bits: c.embed_bits,
+        group: c.group,
+    }
+}
+
+/// Move the token embedding out of `t` into `out/embed.bin` (memory-mapped at run time: its
+/// rows are clean file-backed pages, not the app's own memory).
+fn write_embed(out: &Path, cfg: &Config, t: &mut HashMap<String, Array>) -> Result<()> {
+    let mut rest = Tensors(std::mem::take(t));
+    let embed = rest.qmat(&format!("{PREFIX}.embed_tokens"), cfg.group);
+    *t = rest.0;
+    crate::embed::write(out, embed_shape(cfg), &embed?)
 }
 
 /// One expert's trit record.
@@ -722,7 +752,11 @@ impl Model {
             ironbark_mlx::transforms::eval(layer.arrays())?;
             layers.push(layer);
         }
-        let embed = t.qmat(&format!("{PREFIX}.embed_tokens"), g)?;
+        // Mapped from `embed.bin` in a pack (rows are paged in as tokens use them).
+        let embed = match crate::embed::map(dir, embed_shape(&cfg))? {
+            Some(e) => e,
+            None => t.qmat(&format!("{PREFIX}.embed_tokens"), g)?,
+        };
         let norm = t.take(&format!("{PREFIX}.norm.weight"))?;
         let head = t.qmat("language_model.lm_head", g)?;
         ironbark_mlx::transforms::eval([
@@ -2017,6 +2051,15 @@ mod tests {
     }
 
     #[test]
+    fn embedding_bits_follow_the_override_else_the_default() {
+        let default = serde_json::json!({ "group_size": 64, "bits": 4 });
+        assert_eq!(embed_bits(&default), 4);
+        let own = serde_json::json!({ "bits": 4, "language_model.model.embed_tokens": { "bits": 8 } });
+        assert_eq!(embed_bits(&own), 8);
+        assert_eq!(embed_bits(&serde_json::Value::Null), 4);
+    }
+
+    #[test]
     fn route_keeps_the_top_k_renormalized() {
         // Scores for 1 token over 4 experts; a fake router is the identity on 4 dims.
         let c = Config {
@@ -2045,6 +2088,7 @@ mod tests {
             vocab: 4,
             eps: 1e-6,
             group: 32,
+            embed_bits: 4,
             expert_ternary: false,
             expert_bits: None,
         };

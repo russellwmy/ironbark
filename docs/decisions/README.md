@@ -92,3 +92,4 @@ Skip it for small, local, easy-to-undo choices.
 | [0002](0002-own-mlx-bindings.md) | Own the MLX bindings in house (ironbark-mlx) | Accepted | 2026-10-16 |
 | [0003](0003-defer-mtp.md) | Defer MTP speculative decoding for Qwen | Accepted | 2026-10-25 |
 | [0004](0004-recover-gpu-on-fresh-stream.md) | Recover from a background GPU failure on a fresh MLX stream | Accepted | 2026-10-25 |
+| [0005](0005-keep-lookahead-not-prerouter.md) | Keep lookahead prefetch for Qwen; do not adopt a trained prerouter | Accepted | 2026-11-09 |

@@ -505,7 +505,7 @@ Measured with Maple on the Mac: [BENCHMARKS.md](https://github.com/russellwmy/ir
 
 ## iOS
 
-`ironbark pack` writes a self-contained streaming dir: `experts.bin`, the embedding as `embed.bin` (memory-mapped), the rest of the checkpoint as `model.safetensors`, `experts.json`, `manifest.json`, config and tokenizer. That dir is what goes on the phone: `D/pack` for Qwen3.6 (~9 GB); for Maple 4.0 GB of trit experts (4.9 GB with `--two-bit`), 0.18 GB embedding, 0.27 GB other weights.
+`ironbark pack` writes a self-contained streaming dir: `experts.bin`, the embedding as `embed.bin` (memory-mapped), the rest of the checkpoint as `model.safetensors`, `experts.json`, `manifest.json`, config and tokenizer. That dir is what goes on the phone: `D/pack` for Qwen3.6 (~9 GB: 7.55 GB experts, 0.29 GB embedding, 1.10 GB other weights); for Maple 4.0 GB of trit experts (4.9 GB with `--two-bit`), 0.18 GB embedding, 0.27 GB other weights.
 
 ### Use in an iOS app
 
@@ -631,7 +631,7 @@ One token per step; the residual stream is carried as (h, hn) so every add + nor
 |---|---|---|
 | Ternary weights | Packed 2-bit codes + one scale α per row, read by custom kernels: matvec (QKV, O, gathered down) and fused up+gate+clamped SwiGLU | MLX's affine layout repeats (α, −α) per 128-weight group: 0.54 GB more memory and more bytes per token |
 | Embedding, LM head | 4-bit affine, stock MLX | Not ternary |
-| Embedding in RAM | Packed models keep it in `embed.bin`, memory-mapped and wrapped as MLX arrays without a copy (`embed.rs`) | One 1 KiB row is read per token; the 175 MB table is clean file-backed memory, not app footprint: 0.19 GB lower peak, same speed |
+| Embedding in RAM | Packed models keep it in `embed.bin`, memory-mapped and wrapped as MLX arrays without a copy (`embed.rs`) | One 1 KiB row is read per token; the table (Maple 175 MB, Qwen3.6 286 MB) is clean file-backed memory, not app footprint: 0.19 GB (Maple) / 0.29 GB (Qwen) lower peak, same speed |
 | Fused kernels | add + RMSNorm; expert weighted sum + add + next RMSNorm; per-head QK norm + RoPE; router GEMV + softmax + top-8 | ~300 → ~13 GPU launches per layer; their reductions follow MLX 0.32, so results stay bit-exact (unit tests compare each against the unfused ops) |
 | KV cache | Preallocated, written in place: full layers grow by 256 slots, sliding layers are a 512-slot ring | Same layout as mlx-lm, so attention sums in the same order (a time-ordered window drifted 0.7% in perplexity past 512 tokens) |
 | Numerics | bf16 activations; RMSNorm and router in fp32; clamp in bf16 | Bit-exact with the reference (an f32 clamp constant promoted the experts to f32 and moved perplexity 8%) |

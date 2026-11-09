@@ -91,12 +91,12 @@ ironbark/
 |---|---|
 | Download | `download.rs`: the hub's file list (`/api/models/<repo>/tree/<rev>`), then one `curl` per file into `<file>.part`, renamed when its size matches; complete files are skipped, partial ones resume. No HTTP stack in the binary |
 | Models dir | `--dir`, else `$IRONBARK_MODELS`, else `~/.ironbark/models` |
-| Pack | `pack.rs`: experts to `experts.bin`, embedding to `embed.bin`, the rest to `model.safetensors`, then `manifest.json` |
+| Pack | `pack.rs` (Maple), `qwen::pack_ternary` / `pack_affine` (Qwen): experts to `experts.bin`, embedding to `embed.bin`, the rest to `model.safetensors`, then `manifest.json` |
 
 | File | Content |
 |---|---|
-| `model.safetensors` | Everything except experts and embedding: attention, routers, norms, LM head, FlashHead (0.27 GB) |
-| `embed.bin` | Token embedding, 4-bit: codes, scales, biases, each region whole 16 KiB pages (0.18 GB). Memory-mapped and wrapped as MLX arrays without a copy: rows are paged in as tokens use them and do not count as app footprint |
+| `model.safetensors` | Everything except experts and embedding: attention, routers, norms, LM head, FlashHead (Maple 0.27 GB, Qwen3.6 1.10 GB) |
+| `embed.bin` | Token embedding, 4-bit: codes, scales, biases, each region whole 16 KiB pages (Maple 0.18 GB, Qwen3.6 0.29 GB). Qwen packs made before it keep the embedding in `model.safetensors` and still load. Memory-mapped and wrapped as MLX arrays without a copy: rows are paged in as tokens use them and do not count as app footprint |
 | `experts.bin` | One record per (layer, expert), no header |
 | `experts.json` | `format` (trit / 2bit), `layers`, `experts`, `record_bytes`, `stride`, `version` |
 | `manifest.json` | Size and hash of every file, and one hash per record |

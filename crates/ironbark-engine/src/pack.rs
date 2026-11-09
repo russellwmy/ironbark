@@ -177,7 +177,7 @@ fn write_slim(model: &Path, out: &Path, cfg: &Config, mut t: HashMap<String, Arr
         group: cfg.head_group as i32,
         bits: cfg.head_bits as i32,
     };
-    crate::embed::write(out, cfg, &embed)?;
+    crate::embed::write(out, crate::embed::Shape::maple(cfg), &embed)?;
     drop(embed);
     let file = "model.safetensors";
     let path = out.join(file);
