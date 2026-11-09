@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "image",
  "ironbark-engine",
@@ -590,7 +590,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "half",
  "ironbark-experts",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-experts"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-fetch"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ironbark-experts",
  "serde_json",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ironbark",
  "ironbark-engine",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-mlx"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "float_eq",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-mlx-sys"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bindgen",
  "cc",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "ironbark-serve"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",

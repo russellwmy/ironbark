@@ -37,7 +37,7 @@ env:
   # Dependency order; ironbark-ffi is publish = false.
   CRATES: >-
     ironbark-mlx-sys ironbark-mlx ironbark-experts ironbark-fetch
-    ironbark-engine ironbark ironbark-cli
+    ironbark-engine ironbark ironbark-cli ironbark-serve
 
 jobs:
   publish:

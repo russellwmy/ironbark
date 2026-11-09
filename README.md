@@ -224,11 +224,11 @@ Needs Rust 1.99+, macOS or iOS on Apple Silicon, Xcode and CMake ([Getting start
 
 ```toml
 [dependencies]
-ironbark = "0.3"
-ironbark-fetch = "0.3"   # only for on-demand experts
+ironbark = "0.4"
+ironbark-fetch = "0.4"   # only for on-demand experts
 ```
 
-Install the CLI: `cargo install ironbark-cli` (binary `ironbark`). The C API (`ironbark-ffi`) is not on crates.io; build it from this repo.
+Install the CLI: `cargo install ironbark-cli` (binary `ironbark`). Install the OpenAI-compatible server: `cargo install ironbark-serve` (see [OpenAI-compatible server](#openai-compatible-server)). The C API (`ironbark-ffi`) is not on crates.io; build it from this repo.
 
 ```
  Session::open(dir, Options) ──▶ set_system(date, tools) ──▶ chat(msg) ──▶ Reply (iterator of text pieces)
