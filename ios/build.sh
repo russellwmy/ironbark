@@ -23,7 +23,15 @@ xcodebuild -project IronbarkBench.xcodeproj -scheme IronbarkBench -configuration
 app=build/dd/Build/Products/Release-iphoneos/IronbarkBench.app
 echo "built $app"
 if [[ ${1:-} == --install ]]; then
-  dev=$(xcrun devicectl list devices | awk '/iPhone/ && /available|connected/ {print $3; exit}')
+  # The first paired physical iPhone, by UDID from devicectl's JSON (the text table's columns
+  # shift when a device has no hostname).
+  devices=$(mktemp)
+  xcrun devicectl list devices --quiet --json-output $devices >/dev/null
+  dev=$(jq -r 'first(.result.devices[] | select(.hardwareProperties.reality == "physical"
+    and .hardwareProperties.deviceType == "iPhone" and .connectionProperties.pairingState == "paired")
+    | .hardwareProperties.udid) // empty' $devices)
+  rm -f $devices
+  [[ -n $dev ]] || { print -u2 "no paired iPhone found (xcrun devicectl list devices)"; exit 1; }
   xcrun devicectl device install app --device "$dev" "$app"
   # An install can come with a new, empty data container: check the packs are still there.
   # Listing right after an install can fail, so retry; read it whole (grep -q in a pipe can
