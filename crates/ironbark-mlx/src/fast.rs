@@ -138,6 +138,36 @@ pub fn scaled_dot_product_attention<'a>(
     mask: impl IntoOption<ScaledDotProductAttentionMask<'a>>,
     sinks: impl Into<Option<&'a Array>>,
 ) -> Result<Array> {
+    sdpa(queries, keys, values, scale, mask, sinks, false)
+}
+
+/// [`scaled_dot_product_attention`] that always runs MLX's fused kernel, where MLX would pick
+/// the unfused one (it materializes the `[B, H, L_q, L_k]` scores); fails if no fused kernel
+/// fits the shapes.
+///
+/// # Errors
+///
+/// Fails if no fused kernel supports the shapes, dtypes or mask, or an MLX operation fails.
+pub fn scaled_dot_product_attention_fused<'a>(
+    queries: impl AsRef<Array>,
+    keys: impl AsRef<Array>,
+    values: impl AsRef<Array>,
+    scale: f32,
+    mask: impl IntoOption<ScaledDotProductAttentionMask<'a>>,
+    sinks: impl Into<Option<&'a Array>>,
+) -> Result<Array> {
+    sdpa(queries, keys, values, scale, mask, sinks, true)
+}
+
+fn sdpa<'a>(
+    queries: impl AsRef<Array>,
+    keys: impl AsRef<Array>,
+    values: impl AsRef<Array>,
+    scale: f32,
+    mask: impl IntoOption<ScaledDotProductAttentionMask<'a>>,
+    sinks: impl Into<Option<&'a Array>>,
+    force_fused: bool,
+) -> Result<Array> {
     let stream = Stream::thread_local_or_default();
     let (mask_mode, mask_arr) = mask
         .into_option()
@@ -153,7 +183,7 @@ pub fn scaled_dot_product_attention<'a>(
             mask_mode.as_ptr(),
             mask_arr,
             sinks.into().map(|a| a.as_ptr()).unwrap_or(ironbark_mlx_sys::mlx_array_new()),
-            false,
+            force_fused,
             stream.as_ref().as_ptr(),
         )
     })

@@ -615,7 +615,7 @@ pub fn chunked(q: &Array, k: &Array, v: &Array, g: &Array, beta: &Array, mut sta
         let delta = u.index((.., .., i)).subtract(w.index((.., .., i)).matmul(&st)?)?;
         ys.push(qd.index((.., .., i)).matmul(&st)?.add(p.index((.., .., i)).matmul(&delta)?)?);
         let keep = gl.index((.., .., i)).expand_dims(-1)?;
-        state = state.multiply(&keep)?.add(delta.transpose_axes(&[0, 1, 3, 2])?.matmul(&kd.index((.., .., i)))?)?;
+        state = state.multiply(&keep)?.add(delta.transpose_axes(&[0, 1, 3, 2])?.matmul(kd.index((.., .., i)))?)?;
     }
     let refs: Vec<&Array> = ys.iter().collect();
     let y = concatenate(&refs, 2)?.index((.., .., ..n)).transpose_axes(&[0, 2, 1, 3])?;
@@ -625,6 +625,10 @@ pub fn chunked(q: &Array, k: &Array, v: &Array, g: &Array, beta: &Array, mut sta
 /// The gated delta rule over `L` tokens: `q`, `k` `[B, L, H, Dk]` (heads already repeated to
 /// the value heads), `v` `[B, L, H, Dv]`, `g`, `beta` `[B, L, H]`, `state` `[B, H, Dv, Dk]`
 /// (fp32) → outputs `[B, L, H, Dv]` (in `q`'s dtype) and the new state.
+///
+/// # Errors
+///
+/// Fails if an MLX operation fails (shapes that do not match).
 pub fn recurrence(
     q: &Array,
     k: &Array,

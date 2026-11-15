@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ironbark_mlx::fast::ScaledDotProductAttentionMask;
-use ironbark_mlx::ops::indexing::IndexOp;
+use ironbark_mlx::ops::indexing::{IndexOp, TryIndexMutOp};
 use ironbark_mlx::ops::{
     argpartition_axis, argsort, argsort_axis, concatenate, dequantize, floor_divide, gather_qmm, sigmoid, silu,
 };
@@ -41,6 +41,7 @@ use crate::quant::Tensors;
 use crate::tern::{self, TernRecord};
 use crate::{Error, Result};
 
+mod attn;
 pub mod deltanet;
 pub mod vision;
 
@@ -373,18 +374,39 @@ impl Layer {
 /// What one layer carries from token to token.
 #[derive(Clone)]
 enum State {
-    /// Keys and values `[1, kv_heads, capacity, head_dim]`.
+    /// Keys and values `[1, kv_heads, capacity, head_dim]`; the newest decoded ones may be in
+    /// `tail` instead ([`attention_tail`]).
     Kv {
         k: Option<Array>,
         v: Option<Array>,
+        tail: Option<Tail>,
     },
     Delta(deltanet::State),
+}
+
+/// Cached keys from which a prompt chunk's attention runs MLX's fused kernel ([`attention`]).
+const FUSED_FROM: i32 = 4096;
+
+/// Positions in a [`Tail`].
+const TAIL: i32 = 256;
+
+/// Keys and values of positions `start..start + TAIL` (`[1, kv_heads, TAIL, head_dim]`), the
+/// ones decoded since `start`; the rest unused.
+#[derive(Clone)]
+struct Tail {
+    k: Array,
+    v: Array,
+    start: i32,
 }
 
 impl State {
     fn fresh(full: bool) -> Self {
         if full {
-            State::Kv { k: None, v: None }
+            State::Kv {
+                k: None,
+                v: None,
+                tail: None,
+            }
         } else {
             State::Delta(deltanet::State::default())
         }
@@ -392,9 +414,29 @@ impl State {
 
     fn arrays(&self) -> Vec<&Array> {
         match self {
-            State::Kv { k, v } => [k, v].into_iter().flatten().collect(),
+            State::Kv { k, v, tail } => {
+                let t = tail.as_ref().map(|t| [&t.k, &t.v]).into_iter().flatten();
+                [k, v].into_iter().flatten().chain(t).collect()
+            }
             State::Delta(d) => d.arrays(),
         }
+    }
+
+    /// Fold the tail into the main caches.
+    fn flush(&mut self) -> Result<()> {
+        if let State::Kv { k, v, tail } = self
+            && let Some(t) = tail.take()
+        {
+            kv_update(k, v, &t.k, &t.v, t.start)?;
+        }
+        Ok(())
+    }
+
+    /// This state with the tail folded in.
+    fn flushed(&self) -> Result<Self> {
+        let mut s = self.clone();
+        s.flush()?;
+        Ok(s)
     }
 }
 
@@ -454,8 +496,10 @@ impl Snapshot {
     pub fn arrays(&self) -> Vec<(String, Array)> {
         let mut out = Vec::new();
         for (i, state) in self.state.iter().enumerate() {
-            let named: [(&str, Option<&Array>); 2] = match state {
-                State::Kv { k, v } => [("k", k.as_ref()), ("v", v.as_ref())],
+            // A tail that cannot be folded (an MLX failure) is left out with its cache.
+            let state = state.flushed().unwrap_or_else(|_| State::fresh(matches!(state, State::Kv { .. })));
+            let named: [(&str, Option<&Array>); 2] = match &state {
+                State::Kv { k, v, .. } => [("k", k.as_ref()), ("v", v.as_ref())],
                 State::Delta(d) => {
                     let (conv, ssm) = d.parts();
                     [("conv", conv), ("ssm", ssm)]
@@ -475,6 +519,8 @@ impl Snapshot {
 struct FusedDecode {
     fused: crate::fused::Fused,
     delta: deltanet::FusedKernels,
+    /// Attention over the KV caches, when the head shape fits ([`attn::DecodeAttention::fits`]).
+    attn: Option<attn::DecodeAttention>,
     /// Ternary records: their kernels with the shared expert. Affine records use the slab's.
     tern: Option<tern::FastKernels>,
     /// Per layer: the shared expert as a record, and each expert's slot in the layer's slab.
@@ -534,6 +580,8 @@ impl FusedDecode {
         Ok(Some(Self {
             fused: crate::fused::Fused::new(c.eps, c.theta),
             delta: deltanet::FusedKernels::new(c.delta, c.eps),
+            attn: (attn::DecodeAttention::fits(c.heads, c.kv_heads, c.head_dim))
+                .then(|| attn::DecodeAttention::new(c.heads, c.kv_heads, c.head_dim)),
             tern,
             layers: per,
             zero: Array::zeros::<f32>(&[1, 1, crate::fused::HIDDEN])?.as_dtype(Dtype::Bfloat16)?,
@@ -841,6 +889,7 @@ impl Model {
                 State::Kv { .. } => State::Kv {
                     k: get(i, "k"),
                     v: get(i, "v"),
+                    tail: None,
                 },
                 State::Delta(_) => State::Delta(deltanet::State::from_parts(get(i, "conv"), get(i, "ssm"))),
             };
@@ -862,7 +911,11 @@ impl Model {
         let state = (self.state.iter())
             .map(|s| match s {
                 State::Delta(_) => s.clone(),
-                State::Kv { .. } => State::Kv { k: None, v: None },
+                State::Kv { .. } => State::Kv {
+                    k: None,
+                    v: None,
+                    tail: None,
+                },
             })
             .collect();
         Snapshot {
@@ -940,13 +993,16 @@ impl Model {
         let pad = pad.ok_or_else(|| Error::Format("batch: needs prefilled sequences".into()))?;
         let mut state = Vec::with_capacity(self.cfg.layers);
         for i in 0..self.cfg.layers {
-            let rows: Vec<&State> = snaps.iter().map(|s| &s.state[i]).collect();
-            state.push(match rows[0] {
+            let rows: Vec<State> = snaps.iter().map(|s| s.state[i].flushed()).collect::<Result<_>>()?;
+            state.push(match &rows[0] {
                 State::Kv { .. } => {
                     // Each row's keys and values up to its length, then zeros up to `pad`.
                     let (mut ks, mut vs) = (Vec::new(), Vec::new());
                     for (r, &len) in rows.iter().zip(&lens) {
-                        let State::Kv { k: Some(k), v: Some(v) } = r else {
+                        let State::Kv {
+                            k: Some(k), v: Some(v), ..
+                        } = r
+                        else {
                             return Err(Error::Format("batch: attention cache missing".into()));
                         };
                         let fill = |a: &Array| -> Result<Array> {
@@ -965,6 +1021,7 @@ impl Model {
                     State::Kv {
                         k: Some(concatenate(&ks, 0)?),
                         v: Some(concatenate(&vs, 0)?),
+                        tail: None,
                     }
                 }
                 State::Delta(_) => {
@@ -1028,7 +1085,7 @@ impl Model {
             let ly = &self.layers[i];
             let x = fast::rms_norm(&h, Some(&ly.in_norm), c.eps)?.reshape(&[bn, 1, -1])?;
             let m = match (&ly.mixer, &mut b.state[i]) {
-                (Mixer::Attn(a), State::Kv { k, v }) => attention_batch(c, a, k, v, &x, &offsets, &mask, at)?,
+                (Mixer::Attn(a), State::Kv { k, v, .. }) => attention_batch(c, a, k, v, &x, &offsets, &mask, at)?,
                 (Mixer::Delta(d), State::Delta(s)) => d.forward(&x, s, c.eps, self.step.as_ref())?,
                 _ => return Err(Error::Format("layer state does not match its mixer".into())),
             };
@@ -1398,7 +1455,10 @@ impl Model {
         for i in 0..self.layers.len() {
             let ly = &self.layers[i];
             let r = match (&ly.mixer, &mut self.state[i]) {
-                (Mixer::Attn(a), State::Kv { k, v }) => attention(c, a, k, v, &hn, pos, &rope)?,
+                (Mixer::Attn(a), State::Kv { k, v, tail }) => match &f.attn {
+                    Some(fa) => attention_tail(c, a, k, v, tail, &hn, pos, &rope, fa)?,
+                    None => attention(c, a, k, v, &hn, pos, &rope)?,
+                },
                 (Mixer::Delta(d), State::Delta(s)) => d.step_fused(&hn, s, &f.delta)?,
                 _ => return Err(Error::Format("layer state does not match its mixer".into())),
             };
@@ -1446,6 +1506,9 @@ impl Model {
         {
             return self.step_fused(ids);
         }
+        for s in &mut self.state {
+            s.flush()?;
+        }
         // Dynamic top-k on decode steps (one token) only.
         let dynamic = n == 1;
         let mut h = match mm {
@@ -1466,7 +1529,7 @@ impl Model {
             let ly = &self.layers[i];
             let x = fast::rms_norm(&h, Some(&ly.in_norm), c.eps)?;
             let m = match (&ly.mixer, &mut self.state[i]) {
-                (Mixer::Attn(a), State::Kv { k, v }) => attention(c, a, k, v, &x, pos, &rope)?,
+                (Mixer::Attn(a), State::Kv { k, v, .. }) => attention(c, a, k, v, &x, pos, &rope)?,
                 (Mixer::Delta(d), State::Delta(s)) => d.forward(&x, s, c.eps, self.step.as_ref())?,
                 _ => return Err(Error::Format("layer state does not match its mixer".into())),
             };
@@ -1752,17 +1815,9 @@ fn rope_table(t: &Array, rotary: i32, cos: &Array, sin: &Array) -> Result<Array>
     Ok(concatenate(&[o1, o2, f.index((.., .., .., rotary..))], -1)?.as_dtype(t.dtype())?)
 }
 
-/// Gated attention of one layer on `x` `[1, L, hidden]`, its keys written from cache position
-/// `pos`, rotated by `rope`.
-fn attention(
-    c: &Config,
-    a: &Attention,
-    kc: &mut Option<Array>,
-    vc: &mut Option<Array>,
-    x: &Array,
-    pos: i32,
-    rope: &Rope<'_>,
-) -> Result<Array> {
+/// The rotated queries and keys `[1, heads | kv_heads, L, head_dim]`, values and output gate
+/// `[1, L, heads · head_dim]` of `x` `[1, L, hidden]`.
+fn project(c: &Config, a: &Attention, x: &Array, rope: &Rope<'_>) -> Result<(Array, Array, Array, Array)> {
     let n = x.shape()[1];
     let (nq, nkv, d) = (c.heads as i32, c.kv_heads as i32, c.head_dim as i32);
     // Per head: the query, then its gate.
@@ -1780,10 +1835,80 @@ fn attention(
         }
     };
     let (q, k) = (rope(&q)?, rope(&k)?);
+    Ok((q, k, v, gate))
+}
+
+/// Gated attention of one layer on `x` `[1, L, hidden]`, its keys written from cache position
+/// `pos`, rotated by `rope`.
+fn attention(
+    c: &Config,
+    a: &Attention,
+    kc: &mut Option<Array>,
+    vc: &mut Option<Array>,
+    x: &Array,
+    pos: i32,
+    rope: &Rope<'_>,
+) -> Result<Array> {
+    let n = x.shape()[1];
+    let (nq, d) = (c.heads as i32, c.head_dim as i32);
+    let (q, k, v, gate) = project(c, a, x, rope)?;
     let (ks, vs) = kv_update(kc, vc, &k, &v, pos)?;
     let mask = (n > 1).then_some(ScaledDotProductAttentionMask::Causal);
-    let o = fast::scaled_dot_product_attention(&q, &ks, &vs, (d as f32).powf(-0.5), mask, None)?;
+    // MLX runs head dim 256 unfused without NAX (M1-M4): it builds the [heads, L, keys] scores,
+    // and a command buffer keeps several layers' of them alive (28 GB peak at 73k tokens, 16.4
+    // fused, at the same prefill speed). Below FUSED_FROM keys the unfused path is faster.
+    let o = if n > 1 && ks.shape()[2] >= FUSED_FROM {
+        fast::scaled_dot_product_attention_fused(&q, &ks, &vs, (d as f32).powf(-0.5), mask, None)?
+    } else {
+        fast::scaled_dot_product_attention(&q, &ks, &vs, (d as f32).powf(-0.5), mask, None)?
+    };
     let o = o.transpose_axes(&[0, 2, 1, 3])?.reshape(&[1, n, nq * d])?;
+    a.o.apply(&o.multiply(sigmoid(&gate)?)?)
+}
+
+/// [`attention`] of one token `x` `[1, 1, hidden]` through `f`: its key and value go to the
+/// tail, not the main caches. A write into a cache that a queued step still reads copies the
+/// whole cache (MLX donates only a buffer nothing else holds); with decode steps queued one
+/// ahead that was every step, 3 GB per token at 73k tokens. The tail is folded into the main
+/// caches every [`TAIL`] tokens.
+#[expect(clippy::too_many_arguments, reason = "the layer, its caches, position and kernels")]
+fn attention_tail(
+    c: &Config,
+    a: &Attention,
+    kc: &mut Option<Array>,
+    vc: &mut Option<Array>,
+    tail: &mut Option<Tail>,
+    x: &Array,
+    pos: i32,
+    rope: &Rope<'_>,
+    f: &attn::DecodeAttention,
+) -> Result<Array> {
+    let (nq, d) = (c.heads as i32, c.head_dim as i32);
+    let (q, k, v, gate) = project(c, a, x, rope)?;
+    if tail.as_ref().is_none_or(|t| pos < t.start || pos >= t.start + TAIL) {
+        if let Some(t) = tail.take() {
+            kv_update(kc, vc, &t.k, &t.v, t.start)?;
+        }
+        let s = k.shape();
+        let z = Array::zeros::<f32>(&[s[0], s[1], TAIL, s[3]])?.as_dtype(k.dtype())?;
+        *tail = Some(Tail {
+            k: z.clone(),
+            v: z,
+            start: pos,
+        });
+    }
+    let Some(t) = tail.as_mut() else {
+        unreachable!("set above")
+    };
+    let slot = pos - t.start;
+    t.k.try_index_mut((.., .., slot..slot + 1), &k)?;
+    t.v.try_index_mut((.., .., slot..slot + 1), &v)?;
+    let o = match (kc.as_ref(), vc.as_ref()) {
+        (Some(km), Some(vm)) if t.start > 0 => f.apply(&q, km, vm, t.start, &t.k, &t.v, slot + 1)?,
+        _ if t.start == 0 => f.apply(&q, &t.k, &t.v, 0, &t.k, &t.v, slot + 1)?,
+        _ => return Err(Error::Format("attention cache missing".into())),
+    };
+    let o = o.transpose_axes(&[0, 2, 1, 3])?.reshape(&[1, 1, nq * d])?;
     a.o.apply(&o.multiply(sigmoid(&gate)?)?)
 }
 
@@ -2176,5 +2301,120 @@ mod tests {
         let mut got = idx.as_slice::<u32>().to_vec();
         got.sort_unstable();
         assert_eq!(got, [0, 3]);
+    }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+    use ironbark_mlx::ops::indexing::argmax_axis;
+
+    /// Greedy tokens through decode with a tail, prefill after decode, and a rewind into the
+    /// first tail.
+    fn run(m: &mut Model) -> Vec<u32> {
+        let next = |l: &Array| argmax_axis(l, -1, None).unwrap().item_exact::<u32>();
+        m.reset();
+        let a: Vec<u32> = (0..300u32).map(|i| 1000 + i * 37 % 5000).collect();
+        let mut out = Vec::new();
+        let mut l = m.prefill(&a, false).unwrap();
+        let back = m.rewind_point();
+        for _ in 0..300 {
+            let t = next(&l);
+            out.push(t);
+            l = m.step(t).unwrap();
+        }
+        let b: Vec<u32> = (0..100u32).map(|i| 2000 + i * 11).collect();
+        l = m.prefill(&b, false).unwrap();
+        for _ in 0..40 {
+            let t = next(&l);
+            out.push(t);
+            l = m.step(t).unwrap();
+        }
+        m.rewind(&back);
+        l = m.step(out[0]).unwrap();
+        for _ in 0..20 {
+            let t = next(&l);
+            out.push(t);
+            l = m.step(t).unwrap();
+        }
+        out
+    }
+
+    #[test]
+    #[ignore = "needs the release pack"]
+    fn tail_matches_unfused() {
+        let home = std::env::var("HOME").unwrap();
+        let dir = Path::new(&home).join(".ironbark/release/qwen3.6-35b-a3b-ternary-coding-pack");
+        let layout = Layout::read(&dir).unwrap();
+        let mut m = Model::load_streaming(&dir, &dir, layout.experts, 4).unwrap();
+        assert!(m.fast.as_ref().is_some_and(|f| f.attn.is_some()));
+        let fused = run(&mut m);
+        let fast = m.fast.take();
+        let plain = run(&mut m);
+        m.fast = fast;
+        let same = fused.iter().zip(&plain).take_while(|(a, b)| a == b).count();
+        println!("same for {same} of {} tokens", fused.len());
+        assert_eq!(fused, plain);
+    }
+}
+
+#[cfg(test)]
+mod long_ctx_bench {
+    //! `CTX=1400,36800,73400 cargo test --release -p ironbark-engine long_ctx_decode -- --ignored --nocapture`
+    use super::*;
+    use ironbark_mlx::ops::indexing::argmax_axis;
+    use ironbark_mlx::transforms::{async_eval, eval};
+    use std::time::Instant;
+
+    /// Decode speed of the coding pack with its attention caches filled to random keys, at each
+    /// of `CTX` (comma-separated; default 1400,73400) positions, steps queued one ahead.
+    #[test]
+    #[ignore = "needs the release pack; timing"]
+    fn long_ctx_decode() {
+        let home = std::env::var("HOME").unwrap();
+        let dir = Path::new(&home).join(".ironbark/release/qwen3.6-35b-a3b-ternary-coding-pack");
+        let layout = Layout::read(&dir).unwrap();
+        let mut m = Model::load_streaming(&dir, &dir, layout.experts, 4).unwrap();
+        let ctxs: Vec<i32> =
+            std::env::var("CTX").map_or(vec![1400, 73_400], |s| s.split(',').map(|x| x.parse().unwrap()).collect());
+        for ctx in ctxs {
+            m.reset();
+            let ids: Vec<u32> = (0..64u32).map(|i| 1000 + i * 37).collect();
+            m.prefill(&ids, false).unwrap().eval().unwrap();
+            for s in &mut m.state {
+                if let State::Kv { k, v, .. } = s {
+                    let cap = (ctx + 256 + 255) / 256 * 256;
+                    let r = |a: &Array| {
+                        let sh = a.shape();
+                        ironbark_mlx::random::normal::<f32>(&[sh[0], sh[1], cap, sh[3]], None, None, None)
+                            .unwrap()
+                            .as_dtype(a.dtype())
+                            .unwrap()
+                    };
+                    let (nk, nv) = (r(k.as_ref().unwrap()), r(v.as_ref().unwrap()));
+                    eval([&nk, &nv]).unwrap();
+                    *k = Some(nk);
+                    *v = Some(nv);
+                }
+            }
+            m.pos = ctx as usize;
+            let n = 128;
+            let logits = m.step_lazy(&Array::from_slice(&[1000u32], &[1])).unwrap();
+            let mut y = argmax_axis(&logits, -1, None).unwrap().reshape(&[1]).unwrap().as_dtype(Dtype::Uint32).unwrap();
+            async_eval([&y]).unwrap();
+            let t = Instant::now();
+            for _ in 0..n {
+                let nl = m.step_lazy(&y).unwrap();
+                let ny = argmax_axis(&nl, -1, None).unwrap().reshape(&[1]).unwrap().as_dtype(Dtype::Uint32).unwrap();
+                let mut q = m.state_arrays();
+                q.push(&ny);
+                async_eval(q).unwrap();
+                let _ = y.item_exact::<u32>();
+                y = ny;
+            }
+            let _ = y.item_exact::<u32>();
+            let ms = t.elapsed().as_secs_f64() * 1e3 / f64::from(n);
+            println!("ctx {ctx}: {ms:.2} ms/tok ({:.1} tok/s)", 1e3 / ms);
+        }
     }
 }
