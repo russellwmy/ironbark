@@ -534,6 +534,249 @@ impl Kernels {
     }
 }
 
+/// A ternary expert record in the export's own 2-bit layout: each row 16 codes `c ∈ {0, 1, 2}`
+/// per u32 word (low bits first; weight `a · (c − 1)`), the scales as in [`TernRecord`].
+/// 25% more bytes than trits, decoded with shifts only (no table, no split tail).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Tern2Record {
+    pub(crate) hidden: usize,
+    pub(crate) ffn: usize,
+}
+
+impl Tern2Record {
+    /// Bytes of one 2-bit row of `k` weights.
+    pub(crate) fn row(k: usize) -> usize {
+        k / 4
+    }
+
+    pub(crate) fn up(self) -> usize {
+        self.ffn * Self::row(self.hidden)
+    }
+
+    pub(crate) fn down(self) -> usize {
+        2 * self.up()
+    }
+
+    pub(crate) fn gate_scales(self) -> usize {
+        self.down() + self.hidden * Self::row(self.ffn)
+    }
+
+    pub(crate) fn up_scales(self) -> usize {
+        self.gate_scales() + self.ffn * (self.hidden / GROUP) * 2
+    }
+
+    pub(crate) fn down_scales(self) -> usize {
+        self.up_scales() + self.ffn * (self.hidden / GROUP) * 2
+    }
+
+    pub(crate) fn bytes(self) -> usize {
+        self.down_scales() + self.hidden * (self.ffn / GROUP) * 2
+    }
+}
+
+/// 16 codes in word `w` dotted with `x`: `a · (Σ c_i x_i − Σ x_i)`.
+const T2DOT: &str = r"
+inline float tern2_dot(uint w, const thread float* x, float sum, float a) {
+    float acc=0;
+    for (int i=0;i<16;++i) acc+=x[i]*float((w>>(2*i))&3u);
+    return a*(acc-sum);
+}
+";
+
+/// [`UP_GATE`] on 2-bit records ([`Tern2Record`]).
+const UP_GATE2: &str = r"
+    uint lid=thread_index_in_simdgroup, sg=simdgroup_index_in_threadgroup;
+    uint s=threadgroup_position_in_grid.y;
+    uint row0=threadgroup_position_in_grid.x*UR;
+    const device uchar* rec=(const device uchar*)slab+(ulong)slots[s]*REC;
+    const device uint* wg=(const device uint*)rec;
+    const device uint* wu=(const device uint*)(rec+UOFF);
+    const device bfloat16_t* sgate=(const device bfloat16_t*)(rec+GSOFF);
+    const device bfloat16_t* sup=(const device bfloat16_t*)(rec+USOFF);
+    const device bfloat16_t* xv=x+(ulong)tok[s]*H;
+    constexpr uint ROWW=H/16, PART=H/UKS;
+    threadgroup float part[UKS][2*UR];
+    float up[UR]={0}, gate[UR]={0};
+    for (uint k=sg*PART;k<(sg+1)*PART;k+=512) {
+        uint kk=k+lid*16;
+        if (kk<(sg+1)*PART) {
+            float xt[16], sum=0;
+            for (int i=0;i<16;++i) { xt[i]=float(xv[kk+i]); sum+=xt[i]; }
+            uint g=kk/16, grp=kk/64;
+            for (uint r=0;r<UR;++r) {
+                uint row=row0+r;
+                gate[r]+=tern2_dot(wg[row*ROWW+g], xt, sum, float(sgate[row*(H/64)+grp]));
+                up[r]+=tern2_dot(wu[row*ROWW+g], xt, sum, float(sup[row*(H/64)+grp]));
+            }
+        }
+    }
+    for (uint r=0;r<UR;++r) {
+        float gs=simd_sum(gate[r]), us=simd_sum(up[r]);
+        if (lid==0) { part[sg][r]=gs; part[sg][UR+r]=us; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint t=thread_index_in_threadgroup;
+    if (t<UR) {
+        float gs=0, us=0;
+        for (uint j=0;j<UKS;++j) { gs+=part[j][t]; us+=part[j][UR+t]; }
+        float g=float(bfloat16_t(gs)), u=float(bfloat16_t(us));
+        out[(ulong)s*F+row0+t]=bfloat16_t(g/(1.0f+metal::precise::exp(-g))*u);
+    }
+";
+
+/// [`DOWN`] on 2-bit records ([`Tern2Record`]).
+const DOWN2: &str = r"
+    uint lid=thread_index_in_simdgroup, sg=simdgroup_index_in_threadgroup;
+    uint s=threadgroup_position_in_grid.y;
+    uint row0=threadgroup_position_in_grid.x*DR;
+    const device uchar* rec=(const device uchar*)slab+(ulong)slots[s]*REC;
+    const device uint* wd=(const device uint*)(rec+DOFF);
+    const device bfloat16_t* sd=(const device bfloat16_t*)(rec+DSOFF);
+    const device bfloat16_t* xv=act+(ulong)s*F;
+    constexpr uint ROWW=F/16, PART=F/DKS;
+    threadgroup float part[DKS][DR];
+    float y[DR]={0};
+    for (uint k=sg*PART;k<(sg+1)*PART;k+=512) {
+        uint kk=k+lid*16;
+        if (kk<(sg+1)*PART) {
+            float xt[16], sum=0;
+            for (int i=0;i<16;++i) { xt[i]=float(xv[kk+i]); sum+=xt[i]; }
+            uint g=kk/16, grp=kk/64;
+            for (uint r=0;r<DR;++r) {
+                uint row=row0+r;
+                y[r]+=tern2_dot(wd[row*ROWW+g], xt, sum, float(sd[row*(F/64)+grp]));
+            }
+        }
+    }
+    for (uint r=0;r<DR;++r) {
+        float v=simd_sum(y[r]);
+        if (lid==0) part[sg][r]=v;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint t=thread_index_in_threadgroup;
+    if (t<DR) {
+        float v=0;
+        for (uint j=0;j<DKS;++j) v+=part[j][t];
+        out[(ulong)s*H+row0+t]=bfloat16_t(v);
+    }
+";
+
+impl Kernels {
+    /// The two kernels for 2-bit records ([`Tern2Record`]); [`Kernels::apply`] runs them alike.
+    pub(crate) fn new_2bit(rec: Tern2Record, stride: usize) -> Self {
+        let consts = [
+            ("H", rec.hidden),
+            ("F", rec.ffn),
+            ("REC", stride),
+            ("UOFF", rec.up()),
+            ("DOFF", rec.down()),
+            ("GSOFF", rec.gate_scales()),
+            ("USOFF", rec.up_scales()),
+            ("DSOFF", rec.down_scales()),
+            ("UR", UR),
+            ("UKS", UKS),
+            ("DR", DR),
+            ("DKS", DKS),
+        ];
+        let defs: String = consts
+            .iter()
+            .map(|(n, v)| format!("constant constexpr uint {n} = {v};\n"))
+            .collect::<Vec<_>>()
+            .concat();
+        let header = format!("{defs}{T2DOT}");
+        Kernels {
+            up_gate: Kernel::new("ironbark_tern2_up_gate", &["x", "slab", "slots", "tok"], &["out"], UP_GATE2, &header),
+            down: Kernel::new("ironbark_tern2_down", &["act", "slab", "slots"], &["out"], DOWN2, &header),
+            rec: TernRecord {
+                hidden: rec.hidden,
+                ffn: rec.ffn,
+            },
+            stride,
+        }
+    }
+}
+
+/// The two record layouts on the same random experts: their outputs' largest difference and the
+/// GPU time of one call (`slots` experts on one token each), trit and 2-bit.
+#[derive(Debug, Clone, Copy)]
+pub struct LayoutBench {
+    /// Largest |trit − 2-bit| over the outputs.
+    pub max_diff: f32,
+    /// Microseconds per call, trit records.
+    pub trit_us: f64,
+    /// Microseconds per call, 2-bit records.
+    pub twobit_us: f64,
+}
+
+/// Build `experts` random ternary experts (`hidden`, `ffn`) in both layouts, run `slots` of them
+/// on one token each `iters` times per layout, and compare.
+///
+/// # Errors
+///
+/// Fails if an MLX operation fails.
+pub fn layouts_bench(hidden: usize, ffn: usize, experts: usize, slots: usize, iters: usize) -> Result<LayoutBench> {
+    let (h, f) = (hidden, ffn);
+    let r1 = TernRecord { hidden: h, ffn: f };
+    let r2 = Tern2Record { hidden: h, ffn: f };
+    let (s1, s2) = (r1.bytes().div_ceil(PAGE) * PAGE, r2.bytes().div_ceil(PAGE) * PAGE);
+    let mut seed = 11u64;
+    let mut next = || {
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) as u32
+    };
+    let (mut slab1, mut slab2) = (vec![0u8; experts * s1], vec![0u8; experts * s2]);
+    for e in 0..experts {
+        for (rows, cols, at1, at2, sc1, sc2) in [
+            (f, h, 0, 0, r1.gate_scales(), r2.gate_scales()),
+            (f, h, r1.up(), r2.up(), r1.up_scales(), r2.up_scales()),
+            (h, f, r1.down(), r2.down(), r1.down_scales(), r2.down_scales()),
+        ] {
+            // Codes 0..2, 16 per word; scales bf16.
+            let words: Vec<u32> =
+                (0..rows * cols / 16).map(|_| (0..16).fold(0u32, |w, i| w | ((next() % 3) << (2 * i)))).collect();
+            let base1 = e * s1 + at1;
+            rows_to_trits(&words, cols, &mut slab1[base1..base1 + rows * TernRecord::row(cols)]);
+            let base2 = e * s2 + at2;
+            for (i, w) in words.iter().enumerate() {
+                slab2[base2 + 4 * i..base2 + 4 * i + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            for i in 0..rows * cols / GROUP {
+                let v = half::bf16::from_f32(0.01 + 0.02 * (next() % 100) as f32 / 100.0).to_bits().to_le_bytes();
+                let (a, b) = (e * s1 + sc1 + 2 * i, e * s2 + sc2 + 2 * i);
+                slab1[a..a + 2].copy_from_slice(&v);
+                slab2[b..b + 2].copy_from_slice(&v);
+            }
+        }
+    }
+    let k1 = Kernels::new(r1, s1);
+    let k2 = Kernels::new_2bit(r2, s2);
+    let a1 = Array::from_slice(&slab1, &[slab1.len() as i32]);
+    let a2 = Array::from_slice(&slab2, &[slab2.len() as i32]);
+    let xs: Vec<f32> = (0..h).map(|_| (next() % 2000) as f32 / 1000.0 - 1.0).collect();
+    let x = Array::from_slice(&xs, &[1, h as i32]).as_dtype(Dtype::Bfloat16)?;
+    let sl: Vec<u32> = (0..slots).map(|i| (i % experts) as u32).collect();
+    let slots_a = Array::from_slice(&sl, &[slots as i32]);
+    let tok = Array::from_slice(&vec![0u32; slots], &[slots as i32]);
+    let run = |k: &Kernels, slab: &Array| -> Result<(Array, f64)> {
+        let y = k.apply(&x, slab, &slots_a, &tok)?;
+        y.eval()?;
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            k.apply(&x, slab, &slots_a, &tok)?.eval()?;
+        }
+        Ok((y, t.elapsed().as_secs_f64() * 1e6 / iters.max(1) as f64))
+    };
+    let (y1, trit_us) = run(&k1, &a1)?;
+    let (y2, twobit_us) = run(&k2, &a2)?;
+    let d = y1.as_dtype(Dtype::Float32)?.subtract(&y2.as_dtype(Dtype::Float32)?)?.abs()?.max(None)?;
+    d.eval()?;
+    Ok(LayoutBench {
+        max_diff: d.item_exact::<f32>(),
+        trit_us,
+        twobit_us,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

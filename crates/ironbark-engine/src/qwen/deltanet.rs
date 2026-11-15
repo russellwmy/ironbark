@@ -16,7 +16,9 @@
 //! a time (the reference the kernel is tested against).
 
 use ironbark_mlx::ops::indexing::IndexOp;
-use ironbark_mlx::ops::{broadcast_to, concatenate, conv1d, logaddexp, quantized_matmul, sigmoid, silu, stack};
+use ironbark_mlx::ops::{
+    broadcast_to, concatenate, conv1d, logaddexp, maximum, minimum, quantized_matmul, sigmoid, silu, stack, tril,
+};
 use ironbark_mlx::{Array, Dtype, fast};
 
 use super::cast;
@@ -231,7 +233,11 @@ impl DeltaNet {
                 let e = t.expand_dims(-2)?;
                 Ok(broadcast_to(&e, &[bs, n, hk, hv / hk, dk])?.reshape(&[bs, n, hv, dk])?)
             };
-            recurrence(&rep(&q)?, &rep(&k)?, &v, &g, &beta, state)?
+            if n > 1 {
+                chunked(&rep(&q)?, &rep(&k)?, &v, &g, &beta, state)?
+            } else {
+                recurrence(&rep(&q)?, &rep(&k)?, &v, &g, &beta, state)?
+            }
         };
         st.ssm = Some(state);
 
@@ -537,10 +543,89 @@ fn metal(
     Ok((y, state))
 }
 
+/// Tokens per chunk of [`chunked`].
+const CHUNK: i32 = 64;
+
+/// [`recurrence`] in chunks of [`CHUNK`] tokens as matmuls (the WY form of the gated delta
+/// rule), fp32: the same inputs and outputs, a few dozen sequential steps instead of one per
+/// token, so training through a layer is fast.
+///
+/// In a chunk, with `γ_i = Π_{j≤i} g_j` and `S₀` the state before it, the state's updates
+/// `δ_j = β_j (v_j − g_j S_{j−1} k_j)` solve `(I + A) Δ = diag(β) V − diag(βγ) K S₀ᵀ`,
+/// `A_{jm} = β_j (γ_j / γ_m) k_j·k_m` for `m < j`; then `y_i = γ_i S₀ q_i + Σ_{j≤i} (γ_i / γ_j)
+/// (q_i·k_j) δ_j` and the state after it is `γ_C S₀ + Σ_j (γ_C / γ_j) δ_j k_jᵀ`. The solve is
+/// split as `Δ = U − W S₀ᵀ` so every chunk's `U` and `W` come from one forward substitution.
+///
+/// # Errors
+///
+/// Fails if an MLX operation fails.
+pub fn chunked(q: &Array, k: &Array, v: &Array, g: &Array, beta: &Array, mut state: Array) -> Result<(Array, Array)> {
+    let s = q.shape();
+    let (b, n, h, dk) = (s[0], s[1], s[2], s[3]);
+    let dv = v.shape()[3];
+    let c = CHUNK;
+    let nc = (n + c - 1) / c;
+    let pad = nc * c - n;
+    // [B, L, H, D] → [B, H, Nc, C, D]; padding with k = 0 and β = 0 leaves the state as it is.
+    let blocks = |t: &Array, d: i32| -> Result<Array> {
+        let mut t = cast(t, Dtype::Float32)?;
+        if pad > 0 {
+            t = concatenate(&[&t, &Array::zeros::<f32>(&[b, pad, h, d])?], 1)?;
+        }
+        Ok(t.transpose_axes(&[0, 2, 1, 3])?.reshape(&[b, h, nc, c, d])?)
+    };
+    let gates = |t: &Array, fill: f32| -> Result<Array> {
+        let mut t = cast(t, Dtype::Float32)?;
+        if pad > 0 {
+            t = concatenate(&[&t, &Array::ones::<f32>(&[b, pad, h])?.multiply(Array::from_f32(fill))?], 1)?;
+        }
+        Ok(t.transpose_axes(&[0, 2, 1])?.reshape(&[b, h, nc, c])?)
+    };
+    let (qc, kc, vc) = (blocks(q, dk)?, blocks(k, dk)?, blocks(v, dv)?);
+    let (gc, bc) = (gates(g, 1.0)?, gates(beta, 0.0)?);
+    // log γ_i, and γ_i / γ_j for j ≤ i (0 above the diagonal). A gate that underflowed to 0
+    // (bf16) is taken as e^-69, which is 0 to fp32 after a token, so its log stays finite.
+    let cs = maximum(&gc, Array::from_f32(1e-30))?.log()?.cumsum(-1, false, true)?;
+    let seg = cs.expand_dims(-1)?.subtract(cs.expand_dims(-2)?)?;
+    let incl = tril(Array::ones::<f32>(&[c, c])?, 0)?;
+    let strict = tril(Array::ones::<f32>(&[c, c])?, -1)?;
+    let decay = minimum(&seg, Array::from_f32(0.0))?.exp()?.multiply(&incl)?;
+    let kt = kc.transpose_axes(&[0, 1, 2, 4, 3])?;
+    let bcol = bc.expand_dims(-1)?;
+    let a = kc.matmul(&kt)?.multiply(&decay)?.multiply(&strict)?.multiply(&bcol)?;
+    let gam = cs.exp()?.expand_dims(-1)?;
+    let rhs = concatenate(&[&vc.multiply(&bcol)?, &kc.multiply(&bcol)?.multiply(&gam)?], -1)?;
+    // (I + A) X = rhs, A strictly lower triangular: row by row, all chunks at once.
+    let mut x = Array::zeros::<f32>(rhs.shape())?;
+    for j in 0..c {
+        let row = rhs.index((.., .., .., j..j + 1)).subtract(a.index((.., .., .., j..j + 1)).matmul(&x)?)?;
+        let mut hot = vec![0.0f32; c as usize];
+        hot[j as usize] = 1.0;
+        x = x.add(Array::from_slice(&hot, &[c, 1]).multiply(&row)?)?;
+    }
+    let (u, w) = (x.index((.., .., .., .., ..dv)), x.index((.., .., .., .., dv..)));
+    let p = qc.matmul(&kt)?.multiply(&decay)?;
+    let qd = qc.multiply(&gam)?;
+    let last = cs.index((.., .., .., c - 1..c));
+    let kd = kc.multiply(last.subtract(&cs)?.exp()?.expand_dims(-1)?)?;
+    let gl = last.exp()?;
+    let mut ys = Vec::with_capacity(nc as usize);
+    for i in 0..nc {
+        let st = state.transpose_axes(&[0, 1, 3, 2])?;
+        let delta = u.index((.., .., i)).subtract(w.index((.., .., i)).matmul(&st)?)?;
+        ys.push(qd.index((.., .., i)).matmul(&st)?.add(p.index((.., .., i)).matmul(&delta)?)?);
+        let keep = gl.index((.., .., i)).expand_dims(-1)?;
+        state = state.multiply(&keep)?.add(delta.transpose_axes(&[0, 1, 3, 2])?.matmul(&kd.index((.., .., i)))?)?;
+    }
+    let refs: Vec<&Array> = ys.iter().collect();
+    let y = concatenate(&refs, 2)?.index((.., .., ..n)).transpose_axes(&[0, 2, 1, 3])?;
+    Ok((y.as_dtype(q.dtype())?, state))
+}
+
 /// The gated delta rule over `L` tokens: `q`, `k` `[B, L, H, Dk]` (heads already repeated to
 /// the value heads), `v` `[B, L, H, Dv]`, `g`, `beta` `[B, L, H]`, `state` `[B, H, Dv, Dk]`
 /// (fp32) → outputs `[B, L, H, Dv]` (in `q`'s dtype) and the new state.
-pub(crate) fn recurrence(
+pub fn recurrence(
     q: &Array,
     k: &Array,
     v: &Array,

@@ -45,6 +45,7 @@ pub use error::{Error, Result};
 pub use model::{KvSnapshot, Model, StepTiming};
 pub use pack::{Packed, pack};
 pub use prefill::CHUNK;
+pub use tern::{LayoutBench, layouts_bench};
 
 /// Let one Metal command buffer hold a whole decode step: MLX's defaults (20–50 operations) end a
 /// buffer every few layers, and each one costs a submission (Qwen3.6 q4 on an M1 Max: 63 → 82
