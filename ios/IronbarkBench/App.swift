@@ -7,7 +7,7 @@
 // result to Documents/results.jsonl, ending with IRONBARK_DONE (IRONBARK_CANCELLED if the app
 // left the screen).
 //   -models maple,maple-2bit (default: as the chat)  -budgets 0,2,1.5 (GB; 0 = from the device)  -tokens 128
-//   -chars 3000  -profile  -prompts prose,rust
+//   -chars 3000  -profile  -prompts prose,python (also rust: the Mac's coding use, kept for comparison)
 //   -lookahead 1,2 (each budget at each lookahead; default 1)  -flash (each also with FlashHead)
 //   -dynamic 0,0.08,0.10 (each with dynamic top-k off, then dropping experts under each share;
 //   default 0)
@@ -19,6 +19,7 @@
 //   -tools 1024 (tool-calling cases after the runs, replies of at most 1024 tokens; -budgets ""
 //   skips the runs)
 //   -delete maple,maple-2bit (remove these model dirs first: devicectl cannot delete files)
+//   -context 16384 (most tokens a conversation holds; default: the model's, Qwen 4096 on 3 GB)
 //   -uichat 6 (send 6 questions through the real chat, timing the main thread)
 //   -uistress 10 (no model: replay 10 tool-chat turns into the chat view, timing the main thread)
 //   -image cats.jpg -ask "Describe this photo." (Qwen: each model and budget answers about an image
@@ -72,11 +73,15 @@ func take(_ p: UnsafeMutablePointer<CChar>?) -> [String: Any] {
     return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? ["error": "bad json"]
 }
 
-/// Open `model` (a dir in Documents) within `budget` GB of footprint (0: from the device).
-func open(model: String, budget: Double) -> (OpaquePointer?, String?) {
+/// Most tokens a conversation holds (0: the model's default); the bench's `-context`.
+var maxContext: UInt32 = 0
+
+/// Open `model` (a dir in Documents) within `budget` GB of footprint (0: from the device),
+/// holding at most `context` tokens (0: the model's default).
+func open(model: String, budget: Double, context: UInt32 = maxContext) -> (OpaquePointer?, String?) {
     var err: UnsafeMutablePointer<CChar>?
     let path = docs.appendingPathComponent(model).path
-    let s = ironbark_open(path, UInt64(budget * 1e9), 0, &err)
+    let s = ironbark_open_context(path, UInt64(budget * 1e9), 0, context, &err)
     if s == nil {
         let msg = err.map { String(cString: $0) } ?? "open failed"
         if let err { ironbark_free_string(err) }
@@ -231,6 +236,9 @@ final class Chat: ObservableObject {
     }
     // 4.5 GB: more expert slots per layer than the device default (3 GB).
     @Published var budget = 4.5
+    /// Most tokens a conversation holds (0: the model's default, Qwen 4096 on a 3 GB budget);
+    /// the budget reserves its KV cache, so more context leaves fewer expert slots.
+    @Published var context: UInt32 = 0
     /// Reason before answering a message (Maple's replies to tool results always do).
     @Published var think = false
     /// Dynamic top-k: drop each token's experts under this share of its routing (0: off); per
@@ -241,7 +249,7 @@ final class Chat: ObservableObject {
     private let engine = DispatchQueue(label: "ironbark.engine", qos: .userInitiated)
     // Engine queue only:
     private var session: OpaquePointer?
-    private var opened: (String, Double)?
+    private var opened: (String, Double, UInt32)?
     /// Messages of the transcript the session's KV cache holds; otherwise the next turn
     /// rebuilds the conversation from the transcript.
     private var cached = 0
@@ -329,11 +337,11 @@ final class Chat: ObservableObject {
         if #available(iOS 26, *), let t = task as? BGContinuedProcessingTask {
             t.progress.totalUnitCount = Int64(Self.maxTokens)
         }
-        if opened.map({ $0 != (model, budget) }) ?? true {
+        if opened.map({ $0 != (model, budget, context) }) ?? true {
             close()
-            let (s, err) = open(model: model, budget: budget)
+            let (s, err) = open(model: model, budget: budget, context: context)
             session = s
-            opened = s == nil ? nil : (model, budget)
+            opened = s == nil ? nil : (model, budget, context)
             if let err { finish("Error: \(err)", task); return }
             if let s {
                 let date = Date().formatted(.dateTime.weekday(.wide).year().month(.wide).day())
@@ -371,6 +379,14 @@ final class Chat: ObservableObject {
         var answerNow = false
         // One round past the limit, with tool calls off: the model answers with what it has.
         for round in 0...Self.maxRounds + 1 {
+            // A tool call (e.g. a web search) can take seconds: if the app left the screen in the
+            // meantime, reading its result would be GPU work off screen, which iOS refuses. The
+            // result stays in the transcript, not in the KV cache: the next message reads it.
+            if round > 0 && offScreen && task == nil {
+                cut = "paused off screen"
+                held -= 1
+                break
+            }
             ironbark_set_tool_calls(s, !answerNow && round <= Self.maxRounds)
             var start = take(ironbark_send(s, Tools.json(send), rebuild && round == 0))
             // The message does not fit: forget the oldest exchanges until it does.
@@ -384,7 +400,14 @@ final class Chat: ObservableObject {
                 held = history.count + 1
                 start = take(ironbark_send(s, Tools.json(send), true))
             }
-            if let e = start["error"] { cached = 0; forgotten = 0; finish("Error: \(e)", task); return }
+            if let e = start["error"] {
+                cached = 0
+                forgotten = 0
+                // The app left the screen while the message was read: iOS refused the GPU work.
+                let off = "\(e)".contains("background")
+                finish(off ? "Paused: the app left the screen. Send again to continue." : "Error: \(e)", task)
+                return
+            }
             DispatchQueue.main.async { self.releaseText(); self.messages.append(Message(role: .assistant)) }
             var raw = ""
             var ended = false
@@ -750,6 +773,9 @@ struct ChatView: View {
                         Picker("Budget", selection: $chat.budget) {
                             ForEach([0.0, 1.5, 2.0, 3.0, 4.5], id: \.self) { Text($0 == 0 ? "Auto" : String(format: "%.1f GB", $0)) }
                         }
+                        Picker("Context", selection: $chat.context) {
+                            ForEach([UInt32(0), 4096, 8192, 16384], id: \.self) { Text($0 == 0 ? "Auto" : "\($0 / 1024)K tokens") }
+                        }
                     } label: { Image(systemName: "slider.horizontal.3") }
                     .disabled(chat.busy)
                 }
@@ -863,7 +889,7 @@ final class Bench: ObservableObject {
                         DispatchQueue.main.async { self.parts += ps }
                     }
                     _ = take(ironbark_generate(s, "Hello", 4)) // compile the kernels
-                    let prompts = (self.arg("-prompts") ?? "prose,rust").split(separator: ",").map(String.init)
+                    let prompts = (self.arg("-prompts") ?? "prose,python").split(separator: ",").map(String.init)
                     let lookaheads = (self.arg("-lookahead") ?? "1").split(separator: ",").compactMap { UInt32($0) }
                     let flashes = self.flag("-flash") ? [false, true] : [false]
                     let drops = (self.arg("-dynamic") ?? "0").split(separator: ",").compactMap { Float($0) }
@@ -1051,6 +1077,7 @@ final class Bench: ObservableObject {
             }
             return
         }
+        maxContext = UInt32(arg("-context") ?? "0") ?? 0
         for name in (arg("-delete") ?? "").split(separator: ",") where !name.contains("/") && name != ".." {
             try? FileManager.default.removeItem(at: docs.appendingPathComponent(String(name)))
             print("deleted \(name)")

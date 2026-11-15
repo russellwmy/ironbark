@@ -411,7 +411,7 @@ Notes:
 - Give the date in the system turn: without it Maple assumed 2025, doubted a 2026 search result and searched again for 2025.
 - Reasoning can run long (a haiku spent 1024+ tokens counting syllables); cap reply tokens in the app.
 - `Session::send` takes a list of messages (`Message::User`, `Assistant`, `ToolResults`): after `reset`, it rebuilds a conversation from a transcript (earlier replies lose their reasoning, as in the template).
-- The iOS chat offers three tools it runs itself, with no API keys: `calculator` (on device), `get_weather` (Open-Meteo) and `wikipedia_search` (Wikipedia API). It answers up to 3 rounds of calls per message, shows each call and result, folds the reasoning away, and renders the answer's Markdown (headings, lists, quotes, code, tables). C API: `ironbark_set_system`, `ironbark_send`, `ironbark_parse`.
+- The iOS chat offers five tools it runs itself, with no API keys or server: `calculator` and `days_between` (on device), `get_weather` (Open-Meteo), `wikipedia_search` (Wikipedia API) and `web_search` (DuckDuckGo's HTML results page, top 4 without ads; unofficial, so it can break or be refused). It answers up to 3 rounds of calls per message, shows each call and result, folds the reasoning away, and renders the answer's Markdown (headings, lists, quotes, code, tables). C API: `ironbark_set_system`, `ironbark_send`, `ironbark_parse`.
 - Maple's model card notes minimal agentic post-training: measure on your own tools. The iOS app's Bench tab runs the cases above (`-tools 1024`; iPhone 17: Qwen3.6 4 of 4 at 7–9 tok/s, 2026-10-27; Maple 4 of 4 at 21–23 tok/s, 2026-10-15).
 
 ## OpenAI-compatible server
@@ -552,6 +552,7 @@ let parsed = take(ironbark_parse(reply))                         // {thinking, t
 | Call | Use |
 |---|---|
 | `ironbark_open(dir, budget, slots, &err)` | Open a pack; `budget` 0 sizes it to the device |
+| `ironbark_open_context(dir, budget, slots, max_context, &err)` | The same, holding at most `max_context` tokens (0: default; Qwen 4096 on a 3 GB budget). More context leaves fewer expert slots |
 | `ironbark_set_system(s, system, tools)` | System turn and tool schemas; forgets the conversation |
 | `ironbark_send(s, messages, reset)` | Read the new messages (`user`, `assistant`, `tool`); `reset` rebuilds from a full transcript |
 | `ironbark_next(s)` | Next piece of the reply, NULL at its end; stop calling to stop the reply |
@@ -666,7 +667,7 @@ ironbark/
 │   ├── ironbark-mlx/       safe Rust API over MLX
 │   └── ironbark-mlx-sys/   mlx-c bindings; builds MLX for macOS and iOS
 ├── ios/                IronbarkBench: SwiftUI benchmark app (xcodegen)
-├── prompts/            prompt texts for perplexity and benchmarks (prose, rust)
+├── prompts/            prompt texts for perplexity and benchmarks (prose, rust, python)
 └── docs/decisions/     decision records
 ```
 

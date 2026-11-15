@@ -20,6 +20,12 @@ typedef struct Session IronbarkSession;
  * Null on failure; *error gets a message if not null. */
 IronbarkSession *ironbark_open(const char *dir, uint64_t budget, uint32_t slots, char **error);
 
+/* Like ironbark_open, holding at most `max_context` tokens per conversation (0: the model's
+ * default, Qwen 4096 on a 3 GB budget). The budget reserves the KV cache, so a longer context
+ * leaves fewer expert cache slots. */
+IronbarkSession *ironbark_open_context(const char *dir, uint64_t budget, uint32_t slots,
+                                       uint32_t max_context, char **error);
+
 /* Fetcher: builds a local experts.bin (or embed.bin) from a remote copy, apart from any session. */
 typedef struct Fetcher IronbarkFetcher;
 

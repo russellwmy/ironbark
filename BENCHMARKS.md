@@ -67,6 +67,23 @@ Greedy text and top logits are the same. The app's planner counts only `.safeten
 
 ### Qwen on the iPhone
 
+Engine with the long-context changes (KV tail, fused prompt attention; `dc9f816`), general ternary pack (`gi27`, with `embed.bin`), iPhone 17, device budget (3.02 GB), 128 decoded, dynamic top-k off, measured 2026-11-15:
+
+| Context limit | Prompt | Prompt tokens | Expert slots | Decode | Prefill | Peak | Hit |
+|---|---|---|---|---|---|---|---|
+| 4K (default) | prose | 733 | 40 | 9.46–9.71 tok/s | 58.0–58.5 tok/s | 2.86–2.88 GB | 83% |
+| 4K | Python | 840 | 40 | 8.37–8.52 tok/s | 57.9–58.9 tok/s | 2.86–2.89 GB | 79% |
+| 4K | Rust | 962 | 40 | 6.11–6.31 tok/s | 59.0–59.2 tok/s | 2.87–2.89 GB | 74% |
+| 16K | prose | 733 | 32 | 8.62–8.68 tok/s | 58.9–59.4 tok/s | 2.63–2.67 GB | 80% |
+| 16K | Rust | 962 | 32 | 5.68–5.73 tok/s | 55.7–58.5 tok/s | 2.63–2.64 GB | 71% |
+| 16K | prose | 13,816 | 32 | 6.60 tok/s | 50.4 tok/s | 2.95 GB | 84% |
+| 16K | Rust | 15,733 | 32 | 5.85 tok/s | 48.9 tok/s | 2.96 GB | 81% |
+
+- Against 2026-11-10 (same pack, 0.4.0 engine) the 4K rows are unchanged: on the phone's default context the long-context changes do not apply (prompt chunks use the fused attention only from 4,096 cached keys; streamed decode needs no KV tail).
+- A 16K limit (`ironbark_open_context`, the app's Context setting) reserves its KV cache in the budget: 32 expert slots instead of 40, about 9% slower decode on short prompts. A 14-16K-token prompt fits the budget (peak 2.95 GB); reading it takes 4.5-5.5 minutes.
+- Python code decodes 35% faster than Rust (expert hit 79% vs 74%). The app's default prompts are now prose and Python, the phone's uses; Rust stays as `-prompts rust`.
+- Runs 3× (4K short), 2× (16K short) and 1× (16K long). The 16K long-prompt rows were not measured with the old prompt attention, so how much of the fit the fused attention gives on the phone is unmeasured.
+
 General ternary pack before and after `embed.bin`, the same app build (0.4.0 engine) for both. iPhone 17, device budget (3.02 GB), prose / Rust prompts (733 / 962 tokens), 128 decoded, 3 runs each with the packs alternating, measured 2026-11-10:
 
 | | Old pack | With `embed.bin` |

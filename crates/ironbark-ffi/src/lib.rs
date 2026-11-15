@@ -35,12 +35,14 @@ fn open(
     dir: &Path,
     budget: u64,
     slots: usize,
+    max_context: usize,
     records: Option<Arc<dyn Records>>,
     embed: Option<Arc<dyn Chunks>>,
 ) -> Result<Session> {
     let options = Options {
         budget: (budget > 0).then_some(budget),
         slots: (slots > 0).then_some(slots),
+        max_context: (max_context > 0).then_some(max_context),
         records,
         embed,
         ..Options::default()
@@ -210,7 +212,41 @@ pub unsafe extern "C" fn ironbark_open(
     // SAFETY: forwarded from this function's contract.
     let dir = unsafe { str_arg(dir) };
     let r = dir.and_then(|d| {
-        catch_unwind(|| open(Path::new(d), budget, slots as usize, None, None)).unwrap_or_else(|_| Err("panic".into()))
+        catch_unwind(|| open(Path::new(d), budget, slots as usize, 0, None, None))
+            .unwrap_or_else(|_| Err("panic".into()))
+    });
+    match r {
+        Ok(s) => Box::into_raw(Box::new(s)),
+        Err(e) => {
+            if !error.is_null() {
+                // SAFETY: the caller guarantees `error` is valid for a write.
+                unsafe { *error = to_c(&Value::String(e)) };
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// [`ironbark_open`] holding at most `max_context` tokens per conversation (0: the model's
+/// default, Qwen 4096 on a 3 GB budget). The budget reserves the KV cache, so a longer context
+/// leaves fewer expert cache slots.
+///
+/// # Safety
+///
+/// As [`ironbark_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_open_context(
+    dir: *const c_char,
+    budget: u64,
+    slots: u32,
+    max_context: u32,
+    error: *mut *mut c_char,
+) -> *mut Session {
+    // SAFETY: forwarded from this function's contract.
+    let dir = unsafe { str_arg(dir) };
+    let r = dir.and_then(|d| {
+        catch_unwind(|| open(Path::new(d), budget, slots as usize, max_context as usize, None, None))
+            .unwrap_or_else(|_| Err("panic".into()))
     });
     match r {
         Ok(s) => Box::into_raw(Box::new(s)),
@@ -472,7 +508,7 @@ pub unsafe extern "C" fn ironbark_open_fetchers(
         }
         let records = experts.map(|f| Arc::clone(&f.sparse) as Arc<dyn Records>);
         let chunks = embed.map(|f| Arc::clone(&f.sparse) as Arc<dyn Chunks>);
-        catch_unwind(AssertUnwindSafe(|| open(Path::new(d), budget, slots as usize, records, chunks)))
+        catch_unwind(AssertUnwindSafe(|| open(Path::new(d), budget, slots as usize, 0, records, chunks)))
             .unwrap_or_else(|_| Err("panic".into()))
     });
     match r {

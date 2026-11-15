@@ -1,5 +1,6 @@
 // Tools the chat offers the model, run in the app: a calculator and a day counter (on device),
-// the weather (Open-Meteo) and Wikipedia search. Neither service needs a key. Each result is a
+// the weather (Open-Meteo), Wikipedia search and web search (DuckDuckGo's HTML results page,
+// read the way a browser would: unofficial, so it can break or be refused). None needs a key. Each result is a
 // JSON string for a tool response, kept short: every token of it is read before the reply.
 
 import Foundation
@@ -31,6 +32,9 @@ enum Tools {
         tool("wikipedia_search", "Search Wikipedia. Returns the intro of the top articles: facts about people, "
              + "places, events, science and history. Search one name or topic, not a list of keywords.",
              "query", "One name or topic"),
+        tool("web_search", "Search the web. Returns the top results' titles, URLs and snippets: for news, recent "
+             + "events, prices, products, places and how-tos, or what Wikipedia does not cover.",
+             "query", "What to search for"),
     ]
 
     static var schemasJSON: String {
@@ -61,6 +65,7 @@ enum Tools {
         case "days_between": return daysBetween((args["from"] as? String) ?? "", (args["to"] as? String) ?? "")
         case "get_weather": return weather(arg("city"))
         case "wikipedia_search": return wikipedia(arg("query"))
+        case "web_search": return webSearch(arg("query"))
         default: return json(["error": "no tool named \(name)"])
         }
     }
@@ -266,5 +271,79 @@ enum Tools {
                 return ["title": p["title"] as? String ?? "", "extract": String(extract.prefix(500))]
             }
         return pages.isEmpty ? json(["error": "no results for \(query)"]) : json(pages)
+    }
+
+    // MARK: - Web search
+
+    /// The top results of DuckDuckGo's HTML page for `query` (no ads): one request, no retries.
+    static func webSearch(_ query: String) -> String {
+        guard !query.isEmpty, let u = URL(string: "https://html.duckduckgo.com/html/") else {
+            return json(["error": "empty query"])
+        }
+        var request = URLRequest(url: u, timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("IronbarkBench/1.0 (dev.ironbark.bench)", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var form = URLComponents()
+        form.queryItems = [URLQueryItem(name: "q", value: query)]
+        request.httpBody = form.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B").data(using: .utf8)
+        let done = DispatchSemaphore(value: 0)
+        var page: String?
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            if (response as? HTTPURLResponse)?.statusCode == 200 { page = data.map { String(decoding: $0, as: UTF8.self) } }
+            done.signal()
+        }.resume()
+        _ = done.wait(timeout: .now() + 16)
+        guard let page else { return json(["error": "web search unavailable"]) }
+        let results = parseDuckDuckGo(page)
+        if results.isEmpty {
+            // A challenge page instead of results, or a query with no hits.
+            return json(["error": page.contains("anomaly") || page.contains("challenge")
+                ? "web search refused this request (bot check); try again later"
+                : "no results for \(query)"])
+        }
+        return json(Array(results.prefix(4)))
+    }
+
+    /// Results of a DuckDuckGo HTML page: title, URL and snippet of each, ads left out.
+    static func parseDuckDuckGo(_ page: String) -> [[String: String]] {
+        page.components(separatedBy: "class=\"result results_links").dropFirst().compactMap { block in
+            if block.hasPrefix(" results_links_deep result--ad") || block.contains("duckduckgo.com/y.js") { return nil }
+            guard let link = between(block, "class=\"result__a\" href=\"", "\""),
+                  let title = between(block, "class=\"result__a\" href=\"\(link)\">", "</a>")
+            else { return nil }
+            let snippet = between(block, "class=\"result__snippet\"", "</a>")
+                .map { String($0.drop { $0 != ">" }.dropFirst()) } ?? ""
+            return ["title": text(title), "url": target(entities(link)), "snippet": String(text(snippet).prefix(300))]
+        }
+    }
+
+    /// The text between the first `start` and the next `end` in `s`.
+    private static func between(_ s: String, _ start: String, _ end: String) -> String? {
+        guard let a = s.range(of: start), let b = s.range(of: end, range: a.upperBound..<s.endIndex) else { return nil }
+        return String(s[a.upperBound..<b.lowerBound])
+    }
+
+    /// A result link's destination: DuckDuckGo's redirect (`/l/?uddg=URL`) unwrapped.
+    private static func target(_ link: String) -> String {
+        let full = link.hasPrefix("//") ? "https:" + link : link
+        guard let c = URLComponents(string: full), c.path == "/l/",
+              let u = c.queryItems?.first(where: { $0.name == "uddg" })?.value
+        else { return full }
+        return u
+    }
+
+    /// HTML as plain text: tags removed, entities decoded, whitespace collapsed.
+    private static func text(_ html: String) -> String {
+        let bare = html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        return entities(bare).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    private static func entities(_ s: String) -> String {
+        var out = s
+        for (e, c) in [("&quot;", "\""), ("&#x27;", "'"), ("&#39;", "'"), ("&lt;", "<"), ("&gt;", ">"), ("&nbsp;", " "), ("&amp;", "&")] {
+            out = out.replacingOccurrences(of: e, with: c)
+        }
+        return out
     }
 }

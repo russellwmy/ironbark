@@ -13,7 +13,7 @@ cargo build --release -p ironbark-ffi --target aarch64-apple-ios --manifest-path
 mkdir -p build/prompts
 metallib=$(ls -t ~/.mlx/lib/*-ios$IPHONEOS_DEPLOYMENT_TARGET/mlx.metallib | head -1)
 cp "$metallib" build/mlx.metallib
-for d in prose rust; do cp $root/prompts/$d.txt build/prompts/; done
+for d in prose rust python; do cp $root/prompts/$d.txt build/prompts/; done
 
 xcodegen generate --quiet
 xcodebuild -project IronbarkBench.xcodeproj -scheme IronbarkBench -configuration Release \
