@@ -70,7 +70,8 @@ char *ironbark_generate(IronbarkSession *s, const char *prompt, uint32_t tokens)
 char *ironbark_probe(const char *dir);
 
 /* Qwen3-Embedding in `dir`: load time, then `text` embedded `runs` times (after a warm-up):
- * tokens, median ms, tokens per second, footprint before, at peak and after closing. */
+ * tokens, median ms, tokens per second, footprint before, at peak and after closing (at once
+ * and 2 s later). */
 char *ironbark_embed_bench(const char *dir, const char *text, uint32_t runs);
 
 /* Chat: read `text` (a formatted turn) into the conversation; reset = start a new one.

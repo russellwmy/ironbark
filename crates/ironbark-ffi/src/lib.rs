@@ -543,7 +543,8 @@ pub unsafe extern "C" fn ironbark_generate(s: *mut Session, prompt: *const c_cha
 
 /// Embedding speed of the Qwen3-Embedding model in `dir`: open it, embed `text` once to
 /// compile the kernels, then `runs` times. Returns JSON: load seconds, tokens, median ms and
-/// tokens per second, footprint before opening, at its peak, and after closing.
+/// tokens per second, footprint before opening, at its peak, and after closing (at once and
+/// 2 s later).
 ///
 /// # Safety
 ///
@@ -578,6 +579,9 @@ fn embed_bench(dir: &str, text: &str, runs: usize) -> Result<Value> {
     drop(e);
     secs.sort_by(f64::total_cmp);
     let median = secs[secs.len() / 2];
+    let after = now();
+    // The system takes back freed GPU buffers a moment later.
+    std::thread::sleep(std::time::Duration::from_secs(2));
     Ok(json!({
         "load_s": load_s,
         "tokens": tokens,
@@ -587,7 +591,8 @@ fn embed_bench(dir: &str, text: &str, runs: usize) -> Result<Value> {
         "tok_s": tokens as f64 / median,
         "footprint_before": before,
         "footprint_peak": peak,
-        "footprint_after": now(),
+        "footprint_after": after,
+        "footprint_after_2s": now(),
     }))
 }
 

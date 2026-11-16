@@ -8,6 +8,7 @@ Measured speed, memory and accuracy of ironbark on Apple Silicon, for Qwen3.6-35
 - [Qwen3.6-35B-A3B](#qwen36-35b-a3b)
   - [Qwen on the Mac](#qwen-on-the-mac)
   - [Qwen on the iPhone](#qwen-on-the-iphone)
+- [Qwen3-Embedding-0.6B](#qwen3-embedding-06b)
 - [Dynamic top-k](#dynamic-top-k)
 - [Maple](#maple)
   - [Checkpoint vs reference](#checkpoint-vs-reference)
@@ -109,6 +110,36 @@ Old pack, older engine, 31 experts per layer, measured 2026-10-27:
 | Tool cases (`-tools 1024`): 4 of 4 pass | 10–46 tok/s | 7.3–9.3 tok/s |
 
 Load wait is 40–48 ms per token on prose and 64–73 ms on Rust: about a third of each token on prose and 40% on Rust.
+
+## Qwen3-Embedding-0.6B
+
+4-bit pack (group 64, 335 MB), one text per forward, median of 20 runs after a warm-up (`embed_bench` example on the Mac, `-embed` in the iOS bench app).
+
+| Device | Text | Tokens | Time | Speed | Load | Peak footprint |
+|---|---|---|---|---|---|---|
+| M1 Max | prose | 279 | 59 ms | 4,742 tok/s | 0.24 s | 641 MB (MLX peak) |
+| iPhone 17 | prose (1,400 chars) | 347 | 72 ms | 4,848 tok/s | 0.34 s | 600 MB |
+| iPhone 17 | python (1,400 chars) | 408 | 81 ms | 5,014 tok/s | 0.19 s | 579 MB |
+
+Memory after drop (iPhone 17 footprint):
+
+```
+ before open   14 MB ──▶ peak 600 MB ──▶ drop: 188 MB ──▶ 2 s later: 96 MB (python run: 54 MB)
+```
+
+MLX holds 0 bytes right after drop; the system takes back the freed GPU buffers within ~2 s. The rest is the tokenizer's heap (~100 MB when loaded), reused by the next open.
+
+Accuracy, cosine to the float32 model (sentence-transformers), 5 texts:
+
+| Weights | Size | Cosine |
+|---|---|---|
+| 4-bit, group 64 (this pack) | 335 MB | 0.927–0.954 |
+| 4-bit, group 32 | 355 MB | 0.939–0.961 |
+| mixed 4/6-bit | 334 MB | 0.943–0.970 |
+| 6-bit, group 64 | 462 MB | 0.992–0.995 |
+| 8-bit, group 64 | 604 MB | 0.999 |
+
+ironbark and mlx-lm give the same cosine on the same weights (0.9427 for the query); query-to-document rankings match the reference at every precision.
 
 ## Dynamic top-k
 
