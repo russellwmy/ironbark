@@ -58,6 +58,9 @@ pub struct Embedder {
     end: u32,
     max_tokens: usize,
     dims: usize,
+    /// MLX's buffer cache limit before [`Embedder::open`] lowered it to [`BUFFER_CACHE`], put
+    /// back on drop; `None` if it was already that low.
+    cache_before: Option<usize>,
 }
 
 impl Embedder {
@@ -68,11 +71,6 @@ impl Embedder {
     /// Fails if a file is missing, `dims` is 0 or above the model's, or MLX cannot load it.
     pub fn open(dir: impl AsRef<Path>, options: EmbedOptions) -> Result<Self> {
         let dir = dir.as_ref();
-        // Lower the limit, never raise it (a session may have set a smaller one).
-        let before = ironbark_mlx::memory::set_cache_limit(BUFFER_CACHE)?;
-        if before < BUFFER_CACHE {
-            ironbark_mlx::memory::set_cache_limit(before)?;
-        }
         let model = EmbedModel::load(dir)?;
         let hidden = model.config().hidden;
         let dims = options.dims.unwrap_or(hidden);
@@ -81,12 +79,22 @@ impl Embedder {
         }
         let tok = Tokenizer::from_file(dir.join("tokenizer.json")).map_err(tok_err)?;
         let end = tok.token_to_id(END).ok_or_else(|| Error::Tokenizer(format!("no {END} token")))?;
+        // Last, so a failed open leaves the limit alone. Lower it, never raise it (a session
+        // may have set a smaller one).
+        let before = ironbark_mlx::memory::set_cache_limit(BUFFER_CACHE)?;
+        let cache_before = if before < BUFFER_CACHE {
+            ironbark_mlx::memory::set_cache_limit(before)?;
+            None
+        } else {
+            Some(before)
+        };
         Ok(Self {
             model: Some(model),
             tok,
             end,
             max_tokens: options.max_tokens.max(1),
             dims,
+            cache_before,
         })
     }
 
@@ -145,6 +153,14 @@ impl Drop for Embedder {
         drop(self.model.take());
         // Return the weights' buffers, now in MLX's cache, to the system.
         let _ = ironbark_mlx::memory::clear_cache();
+        // Put back the limit open lowered, unless something (a session opened since) set
+        // another one: that one stays.
+        if let Some(before) = self.cache_before
+            && let Ok(now) = ironbark_mlx::memory::set_cache_limit(before)
+            && now != BUFFER_CACHE
+        {
+            let _ = ironbark_mlx::memory::set_cache_limit(now);
+        }
     }
 }
 

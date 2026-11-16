@@ -108,6 +108,23 @@ fn dropping_frees_memory() {
     assert!(after + 300_000_000 < held, "held {held}, after {after}");
 }
 
+#[test]
+fn dropping_restores_the_cache_limit() {
+    let set = ironbark_mlx::memory::set_cache_limit;
+    let big = 1 << 30;
+    set(big).unwrap();
+    let Some(e) = open(EmbedOptions::default()) else { return };
+    assert_eq!(set(64 << 20).unwrap(), 64 << 20, "lowered while open");
+    drop(e);
+    assert_eq!(set(big).unwrap(), big, "put back on drop");
+
+    // A limit set while the embedder is open (a session opened since) stays.
+    let e = open(EmbedOptions::default()).unwrap();
+    set(256 << 20).unwrap();
+    drop(e);
+    assert_eq!(set(big).unwrap(), 256 << 20, "a newer limit kept");
+}
+
 /// MLX's active plus cached bytes.
 fn ironbark_mlx_memory() -> usize {
     ironbark_mlx::memory::active_memory().unwrap() + ironbark_mlx::memory::cache_memory().unwrap()
