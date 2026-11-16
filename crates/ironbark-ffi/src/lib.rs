@@ -552,7 +552,9 @@ pub unsafe extern "C" fn ironbark_generate(s: *mut Session, prompt: *const c_cha
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ironbark_embed_bench(dir: *const c_char, text: *const c_char, runs: u32) -> *mut c_char {
     // SAFETY: forwarded from this function's contract.
-    let (dir, text) = unsafe { (str_arg(dir), str_arg(text)) };
+    let dir = unsafe { str_arg(dir) };
+    // SAFETY: forwarded from this function's contract.
+    let text = unsafe { str_arg(text) };
     report(|| embed_bench(dir?, text?, runs.max(1) as usize))
 }
 
