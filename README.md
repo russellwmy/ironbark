@@ -38,7 +38,7 @@ More: [BENCHMARKS.md](https://github.com/russellwmy/ironbark/blob/main/BENCHMARK
   - [Development](#development)
   - [Release](#release)
 - [Usage](#usage)
-  - [Chat](#chat) · [Options](#options) · [Images](#images) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server)
+  - [Chat](#chat) · [Options](#options) · [Images](#images) · [Tool calls](#tool-calls) · [Conversations](#conversations) · [Dynamic top-k](#dynamic-top-k) · [Experts from a server](#experts-from-a-server) · [Embeddings](#embeddings)
 - [Tool use](#tool-use)
 - [OpenAI-compatible server](#openai-compatible-server)
 - [On-demand experts](#on-demand-experts)
@@ -378,6 +378,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Embeddings
+
+Text embeddings with Qwen3-Embedding-0.6B at 4 bits (335 MB, all in memory, no experts). One forward per text; the last token's hidden state, L2-normalized, is the vector.
+
+```
+ text ──▶ Query: instruction prefix ──▶ tokens + <|endoftext|>, cut to max_tokens
+      ──▶ 28 dense layers (GQA attention, SwiGLU) ──▶ last token ──▶ unit vector [1024]
+      ──▶ first `dims` (Matryoshka), renormalized
+```
+
+```rust
+use ironbark::{EmbedKind, EmbedOptions, Embedder};
+
+fn main() -> ironbark::Result<()> {
+    let opts = EmbedOptions { max_tokens: 512, dims: None }; // dims: Some(256) for shorter vectors
+    let mut e = Embedder::open("qwen3-embedding-0.6b-q4", opts)?;
+    let q = e.embed(&["how do I end the lease"], EmbedKind::Query)?;
+    let d = e.embed(&["Termination: either party may end this lease with 60 days' notice."], EmbedKind::Document)?;
+    let score: f32 = q[0].iter().zip(&d[0]).map(|(a, b)| a * b).sum(); // cosine
+    println!("{score:.3} ({} dims)", e.dims());
+    Ok(()) // dropping `e` frees its memory
+}
+```
+
+| Item | Note |
+|---|---|
+| `EmbedKind::Query` | Prefixed with `Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery:` (sentence-transformers' `query` prompt, no space after the colon); documents get no prefix |
+| `is_embedder(dir)` | True for a dense `qwen3` checkpoint (like `is_qwen` for the MoE) |
+| Memory | MLX's buffer cache is capped at 64 MB while open; drop frees the weights and the cache |
+| Accuracy | Cosine to the float32 model (sentence-transformers): 0.93–0.95 at 4 bits, the same as mlx-lm's own forward of the same weights; rankings match. 6 bits: 0.99 (462 MB); 8 bits: 0.999 (604 MB). Any of these packs loads |
+
+Make the pack (the Hugging Face checkpoint has no `model.` prefix, which `mlx_lm.convert` needs):
+
+| Step | Command |
+|---|---|
+| Rename | Load `Qwen/Qwen3-Embedding-0.6B`'s `model.safetensors`, prefix every name with `model.`, save it next to its config and tokenizer files |
+| Quantize | `mlx_lm.convert --hf-path <renamed> -q --q-bits 4 --q-group-size 64 --mlx-path <raw>` |
+| Pack | `ironbark pack --model <raw> --out ~/.ironbark/release/qwen3-embedding-0.6b-q4`: copies `config.json`, `model.safetensors`, `tokenizer.json`, `LICENSE` and writes `manifest.json` (`ironbark verify` checks it) |
+| Bench | `cargo run --release -p ironbark --example embed_bench -- <pack>` |
+| Test | `IRONBARK_EMBED_MODEL=<pack> cargo test --release -p ironbark --test embedder -- --test-threads=1` |
 
 ## Tool use
 

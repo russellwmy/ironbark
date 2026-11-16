@@ -23,6 +23,7 @@ mod config;
 pub mod device;
 pub mod dynamic;
 mod embed;
+pub mod embedder;
 mod error;
 mod experts;
 mod flash;
@@ -41,6 +42,7 @@ mod row;
 mod tern;
 
 pub use config::{Config, FlashMeta};
+pub use embedder::{EmbedConfig, EmbedModel, is_embedder};
 pub use error::{Error, Result};
 pub use model::{KvSnapshot, Model, StepTiming};
 pub use pack::{Packed, pack};

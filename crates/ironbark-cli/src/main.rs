@@ -118,7 +118,8 @@ enum Cmd {
         revision: String,
     },
     /// Write a streaming model dir: experts to <out>/experts.bin, the other weights, config and
-    /// tokenizer next to it
+    /// tokenizer next to it. An embedding model (Qwen3-Embedding, `mlx_lm.convert -q`): copied
+    /// to <out> (default: in place) with a manifest
     Pack {
         /// MLX checkpoint dir, or a bundle (a 4-bit checkpoint without its experts, plus
         /// experts.safetensors: packs that)
@@ -206,6 +207,12 @@ fn main() -> Result<()> {
             ternary,
             vision_only,
         } => {
+            if ironbark_engine::is_embedder(&model) {
+                let out = out.unwrap_or_else(|| model.clone());
+                ironbark_engine::embedder::pack(&model, &out)?;
+                println!("embedding pack -> {}", out.display());
+                return Ok(());
+            }
             let bundle = ironbark_engine::qwen::bundle_experts(&model);
             let out = match (out, &bundle) {
                 (Some(o), _) => o,

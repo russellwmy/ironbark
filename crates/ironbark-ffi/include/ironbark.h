@@ -69,6 +69,10 @@ char *ironbark_generate(IronbarkSession *s, const char *prompt, uint32_t tokens)
 /* GPU round trip, expert reads from dir/experts.bin (dir may be null), memory. */
 char *ironbark_probe(const char *dir);
 
+/* Qwen3-Embedding in `dir`: load time, then `text` embedded `runs` times (after a warm-up):
+ * tokens, median ms, tokens per second, footprint before, at peak and after closing. */
+char *ironbark_embed_bench(const char *dir, const char *text, uint32_t runs);
+
 /* Chat: read `text` (a formatted turn) into the conversation; reset = start a new one.
  * Then call ironbark_next until it returns NULL (end of the reply); each call returns the next
  * piece of text (possibly ""). ironbark_stats reports the turn's speed and memory. */

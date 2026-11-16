@@ -24,6 +24,8 @@
 //   -uistress 10 (no model: replay 10 tool-chat turns into the chat view, timing the main thread)
 //   -image cats.jpg -ask "Describe this photo." (Qwen: each model and budget answers about an image
 //   in Documents instead of the runs; -pixels 262144 caps its resized size, -tokens the reply)
+//   -embed qwen3-embedding-0.6b-q4 (instead of the runs: embedding speed of that dir in Documents,
+//   on the first -chars of each -prompts text; -runs 20)
 
 import BackgroundTasks
 import PhotosUI
@@ -1060,6 +1062,25 @@ final class Bench: ObservableObject {
 
     func say(_ s: String) { DispatchQueue.main.async { self.log = s } }
 
+    /// Embedding speed on each prompt text (`-embed`).
+    func runEmbed(dir: String, chars: Int, runs: UInt32) {
+        busy = true
+        cancel = false
+        try? FileManager.default.removeItem(at: docs.appendingPathComponent("results.jsonl"))
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.freeOthers()
+            let path = docs.appendingPathComponent(dir).path
+            for name in (self.arg("-prompts") ?? "prose,python").split(separator: ",").map(String.init) where !self.cancel {
+                self.say("\(dir): embedding \(name)…")
+                let r = take(ironbark_embed_bench(path, self.prompt(name, chars: chars), runs))
+                self.emit(["model": dir, "prompt": name, "chars": chars, "embed": r])
+            }
+            self.append(self.cancel ? "IRONBARK_CANCELLED" : "IRONBARK_DONE")
+            self.say(self.cancel ? "Stopped: the app left the screen" : "Done")
+            DispatchQueue.main.async { self.busy = false }
+        }
+    }
+
     func auto() {
         if let turns = Int(arg("-uichat") ?? "") {
             busy = true
@@ -1092,6 +1113,10 @@ final class Bench: ObservableObject {
             let drops = arg("-dynamic") == "default" ? [] : (arg("-dynamic") ?? "0").split(separator: ",").compactMap { Float($0) }
             runChat(models: models, budgets: budgets, drops: drops, tokens: Int(tokens),
                     minutes: Double(arg("-minutes") ?? "0") ?? 0)
+            return
+        }
+        if let dir = arg("-embed") {
+            runEmbed(dir: dir, chars: chars, runs: UInt32(arg("-runs") ?? "20") ?? 20)
             return
         }
         if let file = arg("-image") {

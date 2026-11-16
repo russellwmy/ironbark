@@ -11,6 +11,7 @@
 //!             ──▶ ironbark_parse(reply) ──▶ JSON reasoning, answer, tool calls
 //!             ──▶ ironbark_generate(prompt, n) ──▶ JSON timings, stats, text
 //!             ──▶ ironbark_probe(dir) ──▶ JSON GPU round trip, storage reads, memory
+//!   ironbark_embed_bench(dir, text, runs) ──▶ JSON embedding load time, tokens per second, memory
 //! ```
 
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -538,6 +539,56 @@ pub unsafe extern "C" fn ironbark_generate(s: *mut Session, prompt: *const c_cha
         Some(s) => generate(&mut s.0, prompt?, tokens as usize),
         None => Err("null session".into()),
     })
+}
+
+/// Embedding speed of the Qwen3-Embedding model in `dir`: open it, embed `text` once to
+/// compile the kernels, then `runs` times. Returns JSON: load seconds, tokens, median ms and
+/// tokens per second, footprint before opening, at its peak, and after closing.
+///
+/// # Safety
+///
+/// `dir` and `text` are NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ironbark_embed_bench(dir: *const c_char, text: *const c_char, runs: u32) -> *mut c_char {
+    // SAFETY: forwarded from this function's contract.
+    let (dir, text) = unsafe { (str_arg(dir), str_arg(text)) };
+    report(|| embed_bench(dir?, text?, runs.max(1) as usize))
+}
+
+fn embed_bench(dir: &str, text: &str, runs: usize) -> Result<Value> {
+    use ironbark::{EmbedKind, EmbedOptions, Embedder};
+    use std::time::Instant;
+    let err = |e: ironbark::Error| e.to_string();
+    let now = || ironbark_engine::device::footprint().map_or(0, |f| f.now);
+    let before = now();
+    let t = Instant::now();
+    let mut e = Embedder::open(dir, EmbedOptions::default()).map_err(err)?;
+    let load_s = t.elapsed().as_secs_f64();
+    let tokens = e.tokens(text, EmbedKind::Document).map_err(err)?.len();
+    e.embed(&[text], EmbedKind::Document).map_err(err)?;
+    let mut secs = Vec::with_capacity(runs);
+    let mut peak = now();
+    for _ in 0..runs {
+        let t = Instant::now();
+        e.embed(&[text], EmbedKind::Document).map_err(err)?;
+        secs.push(t.elapsed().as_secs_f64());
+        peak = peak.max(now());
+    }
+    let dims = e.dims();
+    drop(e);
+    secs.sort_by(f64::total_cmp);
+    let median = secs[secs.len() / 2];
+    Ok(json!({
+        "load_s": load_s,
+        "tokens": tokens,
+        "dims": dims,
+        "runs": runs,
+        "median_ms": median * 1e3,
+        "tok_s": tokens as f64 / median,
+        "footprint_before": before,
+        "footprint_peak": peak,
+        "footprint_after": now(),
+    }))
 }
 
 /// Measure the GPU round trip, expert reads from `dir/experts.bin` (skipped when `dir` is null)

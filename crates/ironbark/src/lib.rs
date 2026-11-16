@@ -38,6 +38,7 @@ use sample::Sampler;
 use tokenizers::Tokenizer;
 use tools::Format;
 
+pub use embedder::{EmbedKind, EmbedOptions, Embedder, QUERY_PREFIX, is_embedder};
 pub use engine::is_qwen;
 pub use ironbark_engine::bench::{ExpertStats, Generation, ReadProbe};
 pub use ironbark_engine::device::{Footprint, Hardware};
@@ -51,6 +52,7 @@ pub use sample::Sampling;
 pub use serde_json::{Value, json};
 pub use tools::{Message, Parsed, ToolCall, parse};
 
+mod embedder;
 mod engine;
 mod sample;
 pub mod tools;
