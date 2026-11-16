@@ -558,6 +558,7 @@ pub unsafe extern "C" fn ironbark_embed_bench(dir: *const c_char, text: *const c
     report(|| embed_bench(dir?, text?, runs.max(1) as usize))
 }
 
+#[expect(clippy::disallowed_methods, reason = "a bench measuring memory after a fixed delay, not polling")]
 fn embed_bench(dir: &str, text: &str, runs: usize) -> Result<Value> {
     use ironbark::{EmbedKind, EmbedOptions, Embedder};
     use std::time::Instant;
